@@ -282,6 +282,7 @@ body.editing .remove{display:flex}
 .reco-raw .k{color:var(--ink);font-family:"Spline Sans Mono",monospace;direction:ltr;display:inline-block}
 .gen-wrap{margin-top:26px;padding-top:16px;border-top:2px solid var(--ink)}
 .gen-wrap h3{font-size:20px;font-weight:800}
+.grok-card{background:var(--paper-2);border:1px solid var(--line);border-radius:16px;padding:14px;box-shadow:var(--shadow);margin-top:14px}.grok-head{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:10px}.grok-title{font-family:"Fraunces","Heebo",serif;font-size:17px;font-weight:800;display:flex;align-items:center;gap:7px}.grok-title::before{content:"\2726";color:var(--brass);font-size:15px}.grok-ref{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--teal);border:1.5px solid var(--line);border-radius:10px;padding:7px 11px;background:var(--paper)}.grok-ref:active{transform:scale(.96)}.grok-body{font-size:13.5px;line-height:1.6;color:var(--ink)}.grok-h{font-family:"Fraunces","Heebo",serif;font-weight:800;font-size:15px;color:var(--teal);margin:12px 0 6px}.grok-h:first-child{margin-top:0}.grok-li{position:relative;padding-inline-start:16px;margin:5px 0;color:var(--ink-soft)}.grok-li::before{content:"\2022";position:absolute;inset-inline-start:2px;color:var(--brass);font-weight:700}.grok-p{margin:6px 0;color:var(--ink-soft)}.grok-stamp{font-size:11px;color:var(--ink-soft);margin-top:12px;padding-top:8px;border-top:1px solid var(--line)}.grok-empty{font-size:13px;color:var(--ink-soft);line-height:1.6}.grok-link{color:var(--teal);font-weight:700;text-decoration:underline;background:none;padding:0}.grok-disc{font-size:11px;color:var(--ink-soft);margin-top:10px;line-height:1.5;background:rgba(192,145,47,.08);border-radius:9px;padding:8px 10px}
 .gn{display:block;padding:12px 0;border-bottom:1px solid var(--line)}
 .gn-h{font-size:14px;font-weight:500;color:var(--ink);line-height:1.4;direction:ltr;text-align:left}
 .gn-m{font-size:11px;color:var(--ink-soft);margin-top:4px;direction:ltr;text-align:left}
@@ -293,14 +294,16 @@ body.editing .remove{display:flex}
 <script>
 const FINNHUB="https://finnhub.io/api/v1";
 const PROXIES=[u=>u,u=>"https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u),u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u),u=>"https://corsproxy.io/?url="+encodeURIComponent(u)];
-const LS={key:"mr_key",list:"mr_watch",prof:"mr_profiles",news:"mr_news",snap:"mr_snap",last:"mr_last",sort:"mr_sort",reco:"mr_reco",recoList:"mr_recoList",tickers:"mr_tickers",lastUpdate:"mr_lastUpdate",calls:"mr_calls",gnews:"mr_gnews",tags:"mr_tags",groupOrder:"mr_groupOrder",earn:"mr_earn",hold:"mr_hold",homeTk:"mr_homeTk",guide:"mr_guideSeen",ysym:"mr_ysym"};
+const LS={key:"mr_key",list:"mr_watch",prof:"mr_profiles",news:"mr_news",snap:"mr_snap",last:"mr_last",sort:"mr_sort",reco:"mr_reco",recoList:"mr_recoList",tickers:"mr_tickers",lastUpdate:"mr_lastUpdate",calls:"mr_calls",gnews:"mr_gnews",tags:"mr_tags",groupOrder:"mr_groupOrder",earn:"mr_earn",hold:"mr_hold",homeTk:"mr_homeTk",guide:"mr_guideSeen",ysym:"mr_ysym",grok:"mr_grok",grokRep:"mr_grokRep"};
 const DEFAULTS=[{symbol:"TSLA"},{symbol:"AAPL"},{symbol:"NVDA"},{symbol:"META"},{symbol:"PLTR"},{symbol:"IBIT"},{symbol:"SPY"},{symbol:"QQQ"},{symbol:"INTC"},{symbol:"GOOGL"},{symbol:"AMZN"},{symbol:"AMD"},{symbol:"SOXX"}];
 const MY_KEY="";
 const SHARE_MODE=true; // every user enters their own Finnhub key; nothing is shipped in the file.
 const SHARP=3;
+const GROK_MODEL="grok-4-latest";
 const $=s=>document.querySelector(s);
 const store={get:(k,f)=>{try{return JSON.parse(localStorage.getItem(k))??f}catch{return f}},set:(k,v)=>localStorage.setItem(k,JSON.stringify(v))};
 const getKey=()=>localStorage.getItem(LS.key)||(SHARE_MODE?"":MY_KEY);
+const getGrokKey=()=>localStorage.getItem(LS.grok)||"";
 const todayISO=()=>new Date().toISOString().slice(0,10);
 const fmt=n=>(n==null||isNaN(n))?"—":Number(n).toLocaleString("en-US",{minimumFractionDigits:2,maximumFractionDigits:2});
 const pct=n=>(n>0?"+":"")+n.toFixed(2)+"%";
@@ -469,6 +472,7 @@ function buildPager(){
     <section class="panel" id="p-home" dir="rtl"><div class="inner"><div class="home" id="homeBody"></div></div></section>
     <section class="panel" id="p-reco" dir="rtl"><div class="inner">
       <div class="reco-top"><div class="kicker">מקורות ועדכונים</div><h1 class="he">פיד וחדשות</h1><div class="reco-disc">חשבונות X נבחרים ופיד חדשות השוק. הקשה על חשבון פותחת אותו באפליקציית X. אלה מקורות מידע, לא ייעוץ השקעות.</div></div>
+      <div class="grok-card"><div class="grok-head"><span class="grok-title he">דוח יומי · Grok</span><button class="grok-ref" onclick="haptic();loadGrokReport(true)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>רענון</button></div><div id="grokReport" class="grok-body he"><div class="empty he">טוען דוח…</div></div><div class="grok-disc he">נוצר על ידי Grok עם גישה חיה ל-X. מידע והקשר בלבד, לא ייעוץ השקעות.</div></div>
       <div id="recoBody" class="xgrid"></div>
       <div class="gen-wrap"><h3 class="he">חדשות שוק כלליות</h3><div id="genNews"><div class="empty he">טוען חדשות…</div></div></div>
     </div></section>
@@ -608,6 +612,8 @@ function escapeHtml(s){return (s||"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&l
 function openSettings(){$("#root").innerHTML=`<div dir="rtl" style="max-width:640px;margin:0 auto;padding:env(safe-area-inset-top) 16px 0;height:100dvh;overflow-y:auto"><div style="background:var(--paper-2);border:1px solid var(--line);border-radius:18px;padding:22px;margin:30px 0"><h2 style="font-size:22px;font-weight:700">הגדרות</h2>
 <p style="font-size:13px;color:var(--ink-soft);margin-top:16px">מפתח Finnhub (נשמר במכשיר הזה בלבד). <a href="https://finnhub.io/register" target="_blank" rel="noopener">להוצאת מפתח חינם</a>.</p>
 <input id="keyInput" value="${getKey()}" style="direction:ltr;width:100%;margin-top:8px;padding:11px 12px;border:1px solid var(--line);border-radius:10px;font-family:'Spline Sans Mono',monospace;font-size:13px;background:var(--paper)" onchange="localStorage.setItem('${LS.key}',this.value.trim());">
+<p style="font-size:13px;color:var(--ink-soft);margin-top:20px">מפתח Grok / xAI (אופציונלי — לדוח היומי). <a href="https://console.x.ai" target="_blank" rel="noopener">להוצאת מפתח</a>.</p>
+<input id="grokInput" value="${getGrokKey()}" placeholder="xai-..." style="direction:ltr;width:100%;margin-top:8px;padding:11px 12px;border:1px solid var(--line);border-radius:10px;font-family:'Spline Sans Mono',monospace;font-size:13px;background:var(--paper)" onchange="localStorage.setItem('${LS.grok}',this.value.trim());">
 <h3 style="font-size:16px;font-weight:700;margin-top:26px">שערים במסך הבית</h3>
 <p style="font-size:12.5px;color:var(--ink-soft);margin-top:5px;line-height:1.5">בחר עד 3. מטבעות וסחורות לא נספרים במכסה; SPY ו־QQQ כן (קריאה אחת כל אחד).</p>
 <div id="tkOpts" style="margin-top:10px">${Object.entries(TK_CATALOG).map(([k,v])=>`<label class="tagopt"><input type="checkbox" value="${k}" ${homeTk().includes(k)?"checked":""} onchange="limitTk()"><span>${v.label}</span></label>`).join("")}</div>
@@ -634,7 +640,33 @@ const X_ACCOUNTS=[
 function xInitials(n){const p=n.trim().split(/\s+/);return (p.length>1?(p[0][0]+p[1][0]):n.slice(0,2)).toUpperCase();}
 function xCard(a){return `<a class="xc" href="https://x.com/${a.h}" target="_blank" rel="noopener" onclick="haptic()"><div class="xc-av">${escapeHtml(xInitials(a.n))}</div><div class="xc-t"><div class="xc-n">${escapeHtml(a.n)}</div><div class="xc-c">${escapeHtml(a.c)}</div></div><div class="xc-h mono">@${escapeHtml(a.h)}</div><svg class="xc-go" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h5v5"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a>`;}
 function renderXFeed(){const el=$("#recoBody");if(!el)return;el.innerHTML=X_ACCOUNTS.map(xCard).join("");}
-async function loadReco(){if(recoLoaded)return;recoLoaded=true;renderXFeed();loadGeneralNews();}
+/* ===== Grok daily report (xAI Live Search) ===== */
+async function grokCall(body){const url="https://api.x.ai/v1/chat/completions";const opts={method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+getGrokKey()},body:JSON.stringify(body)};
+ try{const r=await fetch(url,opts);const txt=await r.text();if(!r.ok)throw new Error("HTTP "+r.status+(txt?" "+txt.slice(0,160):""));return JSON.parse(txt);}
+ catch(e){try{const p="https://corsproxy.io/?url="+encodeURIComponent(url);const r=await fetch(p,opts);const txt=await r.text();if(!r.ok)throw new Error("HTTP "+r.status);return JSON.parse(txt);}catch(e2){throw e;}}}
+async function grokDailyReport(){const handles=X_ACCOUNTS.map(a=>a.h);const today=new Date().toLocaleDateString("he-IL",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
+ const body={model:GROK_MODEL,search_parameters:{mode:"auto",sources:[{type:"x",x_handles:handles},{type:"web"}]},messages:[
+  {role:"system",content:"אתה אנליסט שוק ההון. כתוב בעברית בלבד, תמציתי וברור. אל תיתן ייעוץ השקעות — רק מידע והקשר."},
+  {role:"user",content:"הכן דוח שוק יומי לתאריך "+today+" בשני חלקים:\n\n## סיכום החשבונות\nסכם מה שהחשבונות הבאים ב-X פרסמו היום/אתמול (רק מה שרלוונטי לשוק): "+handles.map(function(h){return "@"+h;}).join(", ")+". 3-6 נקודות.\n\n## סקירת שוק אמריקאי\nמצב השוק האמריקאי: מדדים מובילים, מניות בולטות, סנטימנט כללי, ואירועים/דוחות חשובים לשים אליהם לב היום. 4-6 נקודות.\n\nכתוב טקסט פשוט: כותרות שמתחילות ב-## ונקודות שמתחילות ב-•. בלי טבלאות."}
+ ]};
+ const d=await grokCall(body);const text=d&&d.choices&&d.choices[0]&&d.choices[0].message&&d.choices[0].message.content;
+ if(!text)throw new Error("תשובה ריקה מ-Grok");return text.trim();}
+function grokReportHtml(text){return text.split(/\n/).map(function(line){const t=line.trim();if(!t)return "";
+ if(t.indexOf("## ")===0)return '<div class="grok-h">'+escapeHtml(t.slice(3))+'</div>';
+ if(t.charAt(0)==="#")return '<div class="grok-h">'+escapeHtml(t.replace(/^#+\s*/,""))+'</div>';
+ if(/^[•\-\*]\s/.test(t))return '<div class="grok-li">'+escapeHtml(t.replace(/^[•\-\*]\s+/,""))+'</div>';
+ return '<div class="grok-p">'+escapeHtml(t)+'</div>';}).join("");}
+function renderGrokReport(text,cachedDate){const el=$("#grokReport");if(!el)return;const stamp=cachedDate?'<div class="grok-stamp he">עודכן '+escapeHtml(cachedDate)+'</div>':"";el.innerHTML=grokReportHtml(text)+stamp;}
+async function loadGrokReport(force){const el=$("#grokReport");if(!el)return;
+ if(!getGrokKey()){el.innerHTML='<div class="grok-empty he">הוסף מפתח Grok ב<button class="grok-link" onclick="openSettings()">הגדרות</button> כדי לקבל דוח שוק יומי שמסכם את החשבונות ואת השוק האמריקאי.</div>';return;}
+ const c=store.get(LS.grokRep,{});
+ if(!force&&c.date===todayISO()&&c.text){renderGrokReport(c.text,c.date);return;}
+ el.innerHTML='<div class="empty he">Grok מכין דוח… זה עשוי לקחת מספר שניות.</div>';
+ try{const text=await grokDailyReport();store.set(LS.grokRep,{date:todayISO(),text:text});renderGrokReport(text,todayISO());}
+ catch(e){const reason=escapeHtml((e&&e.message)||"שגיאה");const old=store.get(LS.grokRep,{});
+  if(old.text){el.innerHTML='<div class="msg he" style="margin-bottom:8px">לא הצלחנו לרענן ('+reason+') — מוצג דוח מ־'+escapeHtml(old.date||"")+'. <button class="tool he" onclick="loadGrokReport(true)">נסה שוב</button></div>'+grokReportHtml(old.text);}
+  else{el.innerHTML='<div class="msg he">שגיאה בהפקת הדוח: '+reason+'<br><button class="tool he" style="margin-top:8px" onclick="loadGrokReport(true)">נסה שוב</button></div>';}}}
+async function loadReco(){if(recoLoaded)return;recoLoaded=true;loadGrokReport();renderXFeed();loadGeneralNews();}
 async function loadGeneralNews(force){const el=$("#genNews");if(!el)return;el.innerHTML='<div class="empty he">טוען חדשות…</div>';try{const d=await generalNews(force);if(!d.length){el.innerHTML='<div class="empty he">אין חדשות כרגע.</div>';return;}el.innerHTML=d.map(n=>`<a class="gn" href="${n.u}" target="_blank" rel="noopener"><div class="gn-h">${escapeHtml(n.h||"")}</div><div class="gn-m">${escapeHtml(n.s||"")} · ${n.t?new Date(n.t*1000).toLocaleDateString("he-IL",{month:"short",day:"numeric"}):""}</div></a>`).join("");}catch(e){const old=store.get(LS.gnews,{});const reason=escapeHtml((e&&e.message)||"שגיאה לא ידועה");if(old.items&&old.items.length){el.innerHTML=`<div class="msg he" style="margin-bottom:8px">לא הצלחנו לרענן (${reason}) — מוצגות חדשות מ־${old.date}. <button class="tool he" style="margin-top:6px" onclick="loadGeneralNews(true)">נסה שוב</button></div>`+old.items.map(n=>`<a class="gn" href="${n.u}" target="_blank" rel="noopener"><div class="gn-h">${escapeHtml(n.h||"")}</div><div class="gn-m">${escapeHtml(n.s||"")}</div></a>`).join("");}else{el.innerHTML=`<div class="msg he">שגיאה בטעינת חדשות: ${reason}<br><button class="tool he" style="margin-top:8px" onclick="loadGeneralNews(true)">נסה שוב</button></div>`;}}}
 
 document.addEventListener("visibilitychange",()=>{if(document.hidden)return;updateMarketBadge();if(getKey()&&store.get(LS.list,[]).length&&marketStatus()==="open"&&$("#refreshBtn"))refreshAll();});
