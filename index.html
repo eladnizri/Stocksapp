@@ -283,6 +283,8 @@ body.editing .remove{display:flex}
 .gen-wrap{margin-top:26px;padding-top:16px;border-top:2px solid var(--ink)}
 .gen-wrap h3{font-size:20px;font-weight:800}
 .grok-card{background:var(--paper-2);border:1px solid var(--line);border-radius:16px;padding:14px;box-shadow:var(--shadow);margin-top:14px}.grok-head{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:10px}.grok-title{font-family:"Fraunces","Heebo",serif;font-size:17px;font-weight:800;display:flex;align-items:center;gap:7px}.grok-title::before{content:"\2726";color:var(--brass);font-size:15px}.grok-ref{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--teal);border:1.5px solid var(--line);border-radius:10px;padding:7px 11px;background:var(--paper)}.grok-ref:active{transform:scale(.96)}.grok-body{font-size:13.5px;line-height:1.6;color:var(--ink)}.grok-h{font-family:"Fraunces","Heebo",serif;font-weight:800;font-size:15px;color:var(--teal);margin:12px 0 6px}.grok-h:first-child{margin-top:0}.grok-li{position:relative;padding-inline-start:16px;margin:5px 0;color:var(--ink-soft)}.grok-li::before{content:"\2022";position:absolute;inset-inline-start:2px;color:var(--brass);font-weight:700}.grok-p{margin:6px 0;color:var(--ink-soft)}.grok-stamp{font-size:11px;color:var(--ink-soft);margin-top:12px;padding-top:8px;border-top:1px solid var(--line)}.grok-empty{font-size:13px;color:var(--ink-soft);line-height:1.6}.grok-link{color:var(--teal);font-weight:700;text-decoration:underline;background:none;padding:0}.grok-disc{font-size:11px;color:var(--ink-soft);margin-top:10px;line-height:1.5;background:rgba(192,145,47,.08);border-radius:9px;padding:8px 10px}
+.grok-body strong{font-weight:700;color:var(--ink);font-family:"Spline Sans Mono",monospace;letter-spacing:.2px}
+.grok-h{direction:ltr;text-align:left}.grok-li,.grok-p{direction:ltr;text-align:left}
 .gn{display:block;padding:12px 0;border-bottom:1px solid var(--line)}
 .gn-h{font-size:14px;font-weight:500;color:var(--ink);line-height:1.4;direction:ltr;text-align:left}
 .gn-m{font-size:11px;color:var(--ink-soft);margin-top:4px;direction:ltr;text-align:left}
@@ -650,16 +652,19 @@ function grokExtractText(d){if(!d)return "";if(typeof d.output_text==="string"&&
  return out;}
 async function grokDailyReport(){const handles=X_ACCOUNTS.map(a=>a.h);const today=new Date().toLocaleDateString("he-IL",{weekday:"long",day:"numeric",month:"long",year:"numeric"});const fromDate=new Date(Date.now()-3*864e5).toISOString().slice(0,10);
  const body={model:GROK_MODEL,tools:[{type:"x_search",allowed_x_handles:handles,from_date:fromDate},{type:"web_search"}],input:[
-  {role:"system",content:"אתה אנליסט שוק ההון. כתוב בעברית בלבד, תמציתי וברור. אל תיתן ייעוץ השקעות — רק מידע והקשר."},
-  {role:"user",content:"הכן דוח שוק יומי לתאריך "+today+" בשני חלקים:\n\n## סיכום החשבונות\nסכם מה שהחשבונות הבאים ב-X פרסמו לאחרונה (רק מה שרלוונטי לשוק): "+handles.map(function(h){return "@"+h;}).join(", ")+". 3-6 נקודות.\n\n## סקירת שוק אמריקאי\nמצב השוק האמריקאי: מדדים מובילים, מניות בולטות, סנטימנט כללי, ואירועים/דוחות חשובים לשים אליהם לב היום. 4-6 נקודות.\n\nכתוב טקסט פשוט: כותרות שמתחילות ב-## ונקודות שמתחילות ב-•. בלי טבלאות."}
+  {role:"system",content:"You are a financial analyst. Write concise reports. No investment advice."},
+  {role:"user",content:"Market report from X accounts ("+handles.join(", ")+") and web. Use: 📊 Key indices, 🎯 Account insights, ⚡ Movers & watch. Headers: ##, bullets: •. Max 150 words."}
  ]};
  const d=await grokCall(body);const text=grokExtractText(d);
  if(!text||!text.trim())throw new Error("תשובה ריקה מ-Grok");return text.trim();}
-function grokReportHtml(text){return text.split(/\n/).map(function(line){const t=line.trim();if(!t)return "";
- if(t.indexOf("## ")===0)return '<div class="grok-h">'+escapeHtml(t.slice(3))+'</div>';
- if(t.charAt(0)==="#")return '<div class="grok-h">'+escapeHtml(t.replace(/^#+\s*/,""))+'</div>';
- if(/^[•\-\*]\s/.test(t))return '<div class="grok-li">'+escapeHtml(t.replace(/^[•\-\*]\s+/,""))+'</div>';
- return '<div class="grok-p">'+escapeHtml(t)+'</div>';}).join("");}
+function grokReportHtml(text){var HE=["📊","📈","📉","🎯","⚡","🔔","💡","📅","🔥","🚨"];
+ return String(text||"").split(/\n/).map(function(line){var t=line.trim();if(!t)return "";
+ var h=escapeHtml(t).replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/__(.+?)__/g,"<strong>$1</strong>");
+ if(t.indexOf("## ")===0)return '<div class="grok-h">'+h.replace(/^##\s*/,"")+'</div>';
+ if(t.charAt(0)==="#")return '<div class="grok-h">'+h.replace(/^#+\s*/,"")+'</div>';
+ for(var k=0;k<HE.length;k++){if(t.indexOf(HE[k])===0)return '<div class="grok-h">'+h+'</div>';}
+ if(/^[•\-\*]\s/.test(t))return '<div class="grok-li">'+h.replace(/^[•\-\*]\s+/,"")+'</div>';
+ return '<div class="grok-p">'+h+'</div>';}).join("");}
 function renderGrokReport(text,cachedDate){const el=$("#grokReport");if(!el)return;const stamp=cachedDate?'<div class="grok-stamp he">עודכן '+escapeHtml(cachedDate)+'</div>':"";el.innerHTML=grokReportHtml(text)+stamp;}
 async function loadGrokReport(force){const el=$("#grokReport");if(!el)return;
  if(!getGrokKey()){el.innerHTML='<div class="grok-empty he">הוסף מפתח Grok ב<button class="grok-link" onclick="openSettings()">הגדרות</button> כדי לקבל דוח שוק יומי שמסכם את החשבונות ואת השוק האמריקאי.</div>';return;}
@@ -682,7 +687,7 @@ function haptic(duration=10){if(navigator.vibrate)navigator.vibrate(duration);}
 function periodChange(sym,days){const snaps=store.get(LS.snap,{})[sym]||[];if(snaps.length<2)return null;const win=snaps.filter(r=>Date.now()-new Date(r.date).getTime()<days*864e5);if(win.length<2)return null;const start=win[0].open,end=win[win.length-1].close;return(start>0)?((end-start)/start*100):null;}
 function weeklyChange(sym){return periodChange(sym,7);}
 function sparkline(sym,w,ht){const snaps=(store.get(LS.snap,{})[sym]||[]).slice(-10);if(snaps.length<3)return"";const v=snaps.map(r=>r.close).filter(n=>typeof n==="number"&&!isNaN(n));if(v.length<3)return"";const lo=Math.min(...v),hi=Math.max(...v),rg=hi-lo;const pts=v.map((c,i)=>{const x=(i/(v.length-1))*w;const y=rg>0?ht-2-((c-lo)/rg)*(ht-4):ht/2;return x.toFixed(1)+","+y.toFixed(1);}).join(" ");const col=v[v.length-1]>=v[0]?"var(--gain)":"var(--loss)";return `<svg width="${w}" height="${ht}" viewBox="0 0 ${w} ${ht}" style="display:block;overflow:visible"><polyline points="${pts}" fill="none" stroke="${col}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" opacity=".85"/></svg>`;}
-if('serviceWorker'in navigator&&'caches'in window){navigator.serviceWorker.register('data:application/javascript,'+encodeURIComponent(`const CACHE='v1';self.addEventListener('install',e=>self.skipWaiting());self.addEventListener('activate',e=>self.clients.claim());self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(['finnhub','stooq','coingecko','frankfurter'].some(h=>u.hostname.includes(h))){e.respondWith(fetch(e.request).then(r=>r.ok?caches.open(CACHE).then(c=>(c.put(e.request,r.clone()),r)):r).catch(()=>caches.match(e.request)||new Response(JSON.stringify({c:null}))))}else{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request)))}});`)).catch(()=>{});}
+if('serviceWorker'in navigator&&'caches'in window){navigator.serviceWorker.register('data:application/javascript,'+encodeURIComponent(`const CACHE='v2';self.addEventListener('install',e=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));self.addEventListener('fetch',e=>{const u=new URL(e.request.url);if(['finnhub','stooq','coingecko','frankfurter'].some(h=>u.hostname.includes(h))){e.respondWith(fetch(e.request).then(r=>r.ok?caches.open(CACHE).then(c=>(c.put(e.request,r.clone()),r)):r).catch(()=>caches.match(e.request).then(m=>m||new Response(JSON.stringify({c:null})))))}else{e.respondWith(fetch(e.request).catch(()=>caches.match(e.request)))}});`)).catch(()=>{});}
 let lastFailCount=0;
 function paintUpdated(noConn){const el=$("#updated");if(!el)return;if(noConn){el.textContent="אין חיבור למקור הנתונים";return;}const lst=localStorage.getItem("mr_lastUpdate");if(!lst){el.textContent="—";return;}el.textContent="עודכן "+timeSinceUpdate()+(lastFailCount?` · ${lastFailCount} נכשלו`:"");}
 setInterval(()=>{updateMarketBadge();if(!refreshing)paintUpdated(false);},60000);
