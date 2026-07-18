@@ -283,6 +283,8 @@ body.editing .remove{display:flex}
 .gen-wrap{margin-top:26px;padding-top:16px;border-top:2px solid var(--ink)}
 .gen-wrap h3{font-size:20px;font-weight:800}
 .grok-card{background:var(--paper-2);border:1px solid var(--line);border-radius:16px;padding:14px;box-shadow:var(--shadow);margin-top:14px}.grok-head{display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:10px}.grok-title{font-family:"Fraunces","Heebo",serif;font-size:17px;font-weight:800;display:flex;align-items:center;gap:7px}.grok-title::before{content:"\2726";color:var(--brass);font-size:15px}.grok-ref{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;color:var(--teal);border:1.5px solid var(--line);border-radius:10px;padding:7px 11px;background:var(--paper)}.grok-ref:active{transform:scale(.96)}.grok-body{font-size:13.5px;line-height:1.6;color:var(--ink)}.grok-h{font-family:"Fraunces","Heebo",serif;font-weight:800;font-size:15px;color:var(--teal);margin:12px 0 6px}.grok-h:first-child{margin-top:0}.grok-li{position:relative;padding-inline-start:16px;margin:5px 0;color:var(--ink-soft)}.grok-li::before{content:"\2022";position:absolute;inset-inline-start:2px;color:var(--brass);font-weight:700}.grok-p{margin:6px 0;color:var(--ink-soft)}.grok-stamp{font-size:11px;color:var(--ink-soft);margin-top:12px;padding-top:8px;border-top:1px solid var(--line)}.grok-empty{font-size:13px;color:var(--ink-soft);line-height:1.6}.grok-link{color:var(--teal);font-weight:700;text-decoration:underline;background:none;padding:0}.grok-disc{font-size:11px;color:var(--ink-soft);margin-top:10px;line-height:1.5;background:rgba(192,145,47,.08);border-radius:9px;padding:8px 10px}
+.grok-body strong{font-weight:700;color:var(--ink);font-family:"Spline Sans Mono",monospace;letter-spacing:.2px}
+.grok-h{direction:ltr;text-align:left}.grok-li,.grok-p{direction:ltr;text-align:left}
 .gn{display:block;padding:12px 0;border-bottom:1px solid var(--line)}
 .gn-h{font-size:14px;font-weight:500;color:var(--ink);line-height:1.4;direction:ltr;text-align:left}
 .gn-m{font-size:11px;color:var(--ink-soft);margin-top:4px;direction:ltr;text-align:left}
@@ -655,11 +657,14 @@ async function grokDailyReport(){const handles=X_ACCOUNTS.map(a=>a.h);const toda
  ]};
  const d=await grokCall(body);const text=grokExtractText(d);
  if(!text||!text.trim())throw new Error("תשובה ריקה מ-Grok");return text.trim();}
-function grokReportHtml(text){return text.split(/\n/).map(function(line){const t=line.trim();if(!t)return "";
- if(t.indexOf("## ")===0)return '<div class="grok-h">'+escapeHtml(t.slice(3))+'</div>';
- if(t.charAt(0)==="#")return '<div class="grok-h">'+escapeHtml(t.replace(/^#+\s*/,""))+'</div>';
- if(/^[•\-\*]\s/.test(t))return '<div class="grok-li">'+escapeHtml(t.replace(/^[•\-\*]\s+/,""))+'</div>';
- return '<div class="grok-p">'+escapeHtml(t)+'</div>';}).join("");}
+function grokReportHtml(text){var HE=["📊","📈","📉","🎯","⚡","🔔","💡","📅","🔥","🚨"];
+ return String(text||"").split(/\n/).map(function(line){var t=line.trim();if(!t)return "";
+ var h=escapeHtml(t).replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/__(.+?)__/g,"<strong>$1</strong>");
+ if(t.indexOf("## ")===0)return '<div class="grok-h">'+h.replace(/^##\s*/,"")+'</div>';
+ if(t.charAt(0)==="#")return '<div class="grok-h">'+h.replace(/^#+\s*/,"")+'</div>';
+ for(var k=0;k<HE.length;k++){if(t.indexOf(HE[k])===0)return '<div class="grok-h">'+h+'</div>';}
+ if(/^[•\-\*]\s/.test(t))return '<div class="grok-li">'+h.replace(/^[•\-\*]\s+/,"")+'</div>';
+ return '<div class="grok-p">'+h+'</div>';}).join("");}
 function renderGrokReport(text,cachedDate){const el=$("#grokReport");if(!el)return;const stamp=cachedDate?'<div class="grok-stamp he">עודכן '+escapeHtml(cachedDate)+'</div>':"";el.innerHTML=grokReportHtml(text)+stamp;}
 async function loadGrokReport(force){const el=$("#grokReport");if(!el)return;
  if(!getGrokKey()){el.innerHTML='<div class="grok-empty he">הוסף מפתח Grok ב<button class="grok-link" onclick="openSettings()">הגדרות</button> כדי לקבל דוח שוק יומי שמסכם את החשבונות ואת השוק האמריקאי.</div>';return;}
