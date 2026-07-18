@@ -640,17 +640,21 @@ const X_ACCOUNTS=[
 function xInitials(n){const p=n.trim().split(/\s+/);return (p.length>1?(p[0][0]+p[1][0]):n.slice(0,2)).toUpperCase();}
 function xCard(a){return `<a class="xc" href="https://x.com/${a.h}" target="_blank" rel="noopener" onclick="haptic()"><div class="xc-av">${escapeHtml(xInitials(a.n))}</div><div class="xc-t"><div class="xc-n">${escapeHtml(a.n)}</div><div class="xc-c">${escapeHtml(a.c)}</div></div><div class="xc-h mono">@${escapeHtml(a.h)}</div><svg class="xc-go" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4h5v5"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg></a>`;}
 function renderXFeed(){const el=$("#recoBody");if(!el)return;el.innerHTML=X_ACCOUNTS.map(xCard).join("");}
-/* ===== Grok daily report (xAI Live Search) ===== */
-async function grokCall(body){const url="https://api.x.ai/v1/chat/completions";const opts={method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+getGrokKey()},body:JSON.stringify(body)};
+/* ===== Grok daily report (xAI Agent Tools API) ===== */
+async function grokCall(body){const url="https://api.x.ai/v1/responses";const opts={method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+getGrokKey()},body:JSON.stringify(body)};
  try{const r=await fetch(url,opts);const txt=await r.text();if(!r.ok)throw new Error("HTTP "+r.status+(txt?" "+txt.slice(0,160):""));return JSON.parse(txt);}
  catch(e){try{const p="https://corsproxy.io/?url="+encodeURIComponent(url);const r=await fetch(p,opts);const txt=await r.text();if(!r.ok)throw new Error("HTTP "+r.status);return JSON.parse(txt);}catch(e2){throw e;}}}
-async function grokDailyReport(){const handles=X_ACCOUNTS.map(a=>a.h);const today=new Date().toLocaleDateString("he-IL",{weekday:"long",day:"numeric",month:"long",year:"numeric"});
- const body={model:GROK_MODEL,search_parameters:{mode:"auto",sources:[{type:"x",x_handles:handles},{type:"web"}]},messages:[
+function grokExtractText(d){if(!d)return "";if(typeof d.output_text==="string"&&d.output_text.trim())return d.output_text;let out="";
+ if(Array.isArray(d.output))d.output.forEach(function(it){const c=it&&it.content;if(Array.isArray(c))c.forEach(function(p){if(p&&typeof p.text==="string")out+=p.text;});else if(it&&typeof it.text==="string")out+=it.text;});
+ if(!out&&d.choices&&d.choices[0]&&d.choices[0].message&&typeof d.choices[0].message.content==="string")out=d.choices[0].message.content;
+ return out;}
+async function grokDailyReport(){const handles=X_ACCOUNTS.map(a=>a.h);const today=new Date().toLocaleDateString("he-IL",{weekday:"long",day:"numeric",month:"long",year:"numeric"});const fromDate=new Date(Date.now()-3*864e5).toISOString().slice(0,10);
+ const body={model:GROK_MODEL,tools:[{type:"x_search",allowed_x_handles:handles,from_date:fromDate},{type:"web_search"}],input:[
   {role:"system",content:"אתה אנליסט שוק ההון. כתוב בעברית בלבד, תמציתי וברור. אל תיתן ייעוץ השקעות — רק מידע והקשר."},
-  {role:"user",content:"הכן דוח שוק יומי לתאריך "+today+" בשני חלקים:\n\n## סיכום החשבונות\nסכם מה שהחשבונות הבאים ב-X פרסמו היום/אתמול (רק מה שרלוונטי לשוק): "+handles.map(function(h){return "@"+h;}).join(", ")+". 3-6 נקודות.\n\n## סקירת שוק אמריקאי\nמצב השוק האמריקאי: מדדים מובילים, מניות בולטות, סנטימנט כללי, ואירועים/דוחות חשובים לשים אליהם לב היום. 4-6 נקודות.\n\nכתוב טקסט פשוט: כותרות שמתחילות ב-## ונקודות שמתחילות ב-•. בלי טבלאות."}
+  {role:"user",content:"הכן דוח שוק יומי לתאריך "+today+" בשני חלקים:\n\n## סיכום החשבונות\nסכם מה שהחשבונות הבאים ב-X פרסמו לאחרונה (רק מה שרלוונטי לשוק): "+handles.map(function(h){return "@"+h;}).join(", ")+". 3-6 נקודות.\n\n## סקירת שוק אמריקאי\nמצב השוק האמריקאי: מדדים מובילים, מניות בולטות, סנטימנט כללי, ואירועים/דוחות חשובים לשים אליהם לב היום. 4-6 נקודות.\n\nכתוב טקסט פשוט: כותרות שמתחילות ב-## ונקודות שמתחילות ב-•. בלי טבלאות."}
  ]};
- const d=await grokCall(body);const text=d&&d.choices&&d.choices[0]&&d.choices[0].message&&d.choices[0].message.content;
- if(!text)throw new Error("תשובה ריקה מ-Grok");return text.trim();}
+ const d=await grokCall(body);const text=grokExtractText(d);
+ if(!text||!text.trim())throw new Error("תשובה ריקה מ-Grok");return text.trim();}
 function grokReportHtml(text){return text.split(/\n/).map(function(line){const t=line.trim();if(!t)return "";
  if(t.indexOf("## ")===0)return '<div class="grok-h">'+escapeHtml(t.slice(3))+'</div>';
  if(t.charAt(0)==="#")return '<div class="grok-h">'+escapeHtml(t.replace(/^#+\s*/,""))+'</div>';
