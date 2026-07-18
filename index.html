@@ -652,16 +652,17 @@ function grokExtractText(d){if(!d)return "";if(typeof d.output_text==="string"&&
  return out;}
 async function grokDailyReport(){const handles=X_ACCOUNTS.map(a=>a.h);const today=new Date().toLocaleDateString("he-IL",{weekday:"long",day:"numeric",month:"long",year:"numeric"});const fromDate=new Date(Date.now()-3*864e5).toISOString().slice(0,10);
  const body={model:GROK_MODEL,tools:[{type:"x_search",allowed_x_handles:handles,from_date:fromDate},{type:"web_search"}],input:[
-  {role:"system",content:"You are a financial analyst. Write concise reports. No investment advice."},
-  {role:"user",content:"Market report from X accounts ("+handles.join(", ")+") and web. Use: 📊 Key indices, 🎯 Account insights, ⚡ Movers & watch. Headers: ##, bullets: •. Max 150 words."}
+  {role:"system",content:"You are a financial analyst. Provide updates in plain text format ONLY - no markdown, no special formatting. Focus on factual, actionable insights."},
+  {role:"user",content:"Today is "+today+". Get recent posts and insights from these X accounts ("+handles.join(", ")+") and current market news. Structure output with:\n## 📊 Market Snapshot\\n(key indices, market sentiment from news)\n\n## 🎯 X Accounts Summary\\n(what these accounts posted today - key themes, positions, concerns)\n\n## ⚡ Actions & Watch\\n(specific stocks mentioned, economic events today/tomorrow, risks to monitor)\n\nBe concise, specific, no investment advice. Format with ## headers and • bullets only."}
  ]};
  const d=await grokCall(body);const text=grokExtractText(d);
  if(!text||!text.trim())throw new Error("תשובה ריקה מ-Grok");return text.trim();}
 function grokReportHtml(text){var HE=["📊","📈","📉","🎯","⚡","🔔","💡","📅","🔥","🚨"];
  return String(text||"").split(/\n/).map(function(line){var t=line.trim();if(!t)return "";
- var h=escapeHtml(t).replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/__(.+?)__/g,"<strong>$1</strong>");
+ var cleaned=escapeHtml(t).replace(/\[([^\]]+)\]\([^)]*\)/g,"$1");
+ var h=cleaned.replace(/\*\*(.+?)\*\*/g,"<strong>$1</strong>").replace(/__(.+?)__/g,"<strong>$1</strong>");
  if(t.indexOf("## ")===0)return '<div class="grok-h">'+h.replace(/^##\s*/,"")+'</div>';
- if(t.charAt(0)==="#")return '<div class="grok-h">'+h.replace(/^#+\s*/,"")+'</div>';
+ if(t.indexOf("# ")===0)return '<div class="grok-h">'+h.replace(/^#+\s*/,"")+'</div>';
  for(var k=0;k<HE.length;k++){if(t.indexOf(HE[k])===0)return '<div class="grok-h">'+h+'</div>';}
  if(/^[•\-\*]\s/.test(t))return '<div class="grok-li">'+h.replace(/^[•\-\*]\s+/,"")+'</div>';
  return '<div class="grok-p">'+h+'</div>';}).join("");}
