@@ -993,6 +993,30 @@ function renderDataStatus(err, isCache) {
 
 function openSettings() {
   goTab('home');
+  var el = $('#dataCard');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function refreshSnapshot() {
+  try { localStorage.removeItem(LS.snap); } catch (e) {}
+  var box = $('#dataStatus');
+  if (box) box.innerHTML = '<div class="msg">טוען…</div>';
+  loadSnapshot();
+}
+
+/* Drops the cached snapshot only. Alerts, saved filters and anything the
+   previous app stored are left alone. */
+function clearCache() {
+  try {
+    localStorage.removeItem(LS.snap);
+    localStorage.removeItem(LS.proxy);
+  } catch (e) {}
+  if (window.caches && caches.keys) {
+    caches.keys().then(function (keys) {
+      keys.forEach(function (k) { caches.delete(k); });
+    }).catch(function () {});
+  }
+  location.reload();
 }
 
 /* ------------------------------------------------------------------ boot */

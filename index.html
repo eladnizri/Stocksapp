@@ -108,9 +108,30 @@
       <div class="tickers" id="tickers"></div>
     </div>
 
-    <div class="card">
-      <div class="card-h"><span>מצב הנתונים</span></div>
+    <div class="card" id="dataCard">
+      <div class="card-h">
+        <span>מצב הנתונים</span>
+        <button class="sub" onclick="refreshSnapshot()" style="color:var(--teal);font-weight:700">רענן</button>
+      </div>
       <div class="mtable" id="dataStatus"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-h"><span>כללי</span></div>
+      <div class="mtable">
+        <div class="mrow" style="grid-template-columns:1fr auto">
+          <span class="lb">האפליקציה הקודמת</span>
+          <a class="chip" href="legacy.html">פתח</a>
+        </div>
+        <div class="mrow" style="grid-template-columns:1fr auto">
+          <span class="lb">מטמון מקומי</span>
+          <button class="chip" onclick="clearCache()">נקה</button>
+        </div>
+      </div>
+      <div class="score-note" style="margin-top:9px">
+        התיק ורשימת המעקב שלך עדיין שמורים באפליקציה הקודמת ולא נמחקו.
+        ניקוי המטמון לא נוגע בהם ולא בהתראות.
+      </div>
     </div>
 
     <div class="disc">
