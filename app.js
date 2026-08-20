@@ -479,9 +479,34 @@ function renderValuation(row, price, tg) {
       '<div class="msg">אין מספיק נתונים לחישוב שווי הוגן.</div></div>';
   }
 
-  var vals = anchors.map(function (a) { return a.v; }).sort(function (a, b) { return a - b; });
+  /* Anchors can disagree enormously - a company in a heavy capex cycle earns
+     well but generates almost no free cash, so the earnings and cash anchors
+     can sit 30x apart. Averaging those produces a confident-looking number
+     that means nothing, so use the median, drop anchors far away from it, and
+     say plainly when what is left still does not agree. */
+  var median = function (xs) {
+    var s = xs.slice().sort(function (a, b) { return a - b; });
+    var m = Math.floor(s.length / 2);
+    return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+
+  var med0 = median(anchors.map(function (a) { return a.v; }));
+  anchors.forEach(function (a) {
+    a.out = a.v > med0 * 3 || a.v < med0 / 3;
+  });
+  var kept = anchors.filter(function (a) { return !a.out; });
+  if (!kept.length) kept = anchors.slice();
+
+  var vals = kept.map(function (a) { return a.v; })
+                 .sort(function (a, b) { return a - b; });
   var lo = vals[0], hi = vals[vals.length - 1];
-  var mid = vals.reduce(function (a, b) { return a + b; }, 0) / vals.length;
+  var mid = median(vals);
+  var spread = lo > 0 ? hi / lo : Infinity;
+  /* One surviving anchor trivially agrees with itself. That is only good
+     enough when it was the only method available to begin with - if the others
+     were thrown out as outliers, the methods disagreed, and the survivor is
+     not evidence of a consensus. */
+  var agreed = spread <= 3 && (anchors.length === 1 || kept.length >= 2);
   var gap = ((mid - price) / price) * 100;
 
   // Place the current price on a scale spanning half to double fair value.
@@ -492,30 +517,50 @@ function renderValuation(row, price, tg) {
   var verdict = gap > 25 ? 'זול משמעותית' : gap > 8 ? 'זול' :
     gap > -8 ? 'קרוב לשווי הוגן' : gap > -25 ? 'יקר' : 'יקר משמעותית';
   var vcol = gap > 8 ? 'var(--gain)' : gap > -8 ? 'var(--brass)' : 'var(--loss)';
+  if (!agreed) {
+    verdict = 'השיטות לא מסכימות';
+    vcol = 'var(--ink-soft)';
+  }
 
   return '<div class="card">' +
     '<div class="card-h"><span>תמחור לפי מודל</span>' +
-      '<span class="sub">' + anchors.length + ' עוגנים</span></div>' +
-    '<div class="val-gauge">' +
-      // The gradient runs cheap-to-expensive left-to-right in physical space,
-      // and CSS gradients ignore RTL, so these must be placed from the left.
-      '<div class="val-scale">' +
-        '<i class="val-mark" style="left:' + posFair + '%;background:var(--teal)" data-l="הוגן"></i>' +
-        '<i class="val-mark" style="left:' + posPrice + '%" data-l="מחיר"></i>' +
-      '</div>' +
-      '<div class="val-ends"><span>יקר</span><span>זול</span></div>' +
-    '</div>' +
+      '<span class="sub">' + kept.length + ' מתוך ' + anchors.length +
+      ' עוגנים</span></div>' +
+    // Drawing a definite "fair value" marker would contradict the warning, so
+    // the gauge only appears when the methods actually converge.
+    (agreed ?
+      '<div class="val-gauge">' +
+        // The gradient runs cheap-to-expensive left-to-right in physical space,
+        // and CSS gradients ignore RTL, so these must be placed from the left.
+        '<div class="val-scale">' +
+          '<i class="val-mark" style="left:' + posFair + '%;background:var(--teal)" data-l="הוגן"></i>' +
+          '<i class="val-mark" style="left:' + posPrice + '%" data-l="מחיר"></i>' +
+        '</div>' +
+        '<div class="val-ends"><span>יקר</span><span>זול</span></div>' +
+      '</div>' : '') +
     '<div class="val-verdict" style="color:' + vcol + '">' + verdict +
-      ' · ' + pct(gap, 0) + '</div>' +
-    '<div class="val-range">טווח ' + money(lo) + ' – ' + money(hi) +
-      ' · אמצע ' + money(mid) + '</div>' +
+      (agreed ? ' · ' + pct(gap, 0) : '') + '</div>' +
+    '<div class="val-range">' +
+      (agreed ? 'טווח ' + money(lo) + ' – ' + money(hi) + ' · אמצע ' + money(mid)
+              : 'ההערכות נעות בין ' +
+                money(Math.min.apply(null, anchors.map(function (a) { return a.v; }))) +
+                ' ל־' +
+                money(Math.max.apply(null, anchors.map(function (a) { return a.v; })))) +
+    '</div>' +
     '<div class="mtable" style="margin-top:11px">' +
       anchors.map(function (a) {
         return '<div class="mrow" style="grid-template-columns:1fr auto">' +
-          '<span class="lb">' + a.k + '</span>' +
-          '<span class="vl">' + money(a.v) + '</span></div>';
+          '<span class="lb"' + (a.out ? ' style="opacity:.5"' : '') + '>' +
+            a.k + (a.out ? ' · חריג, לא נכלל' : '') + '</span>' +
+          '<span class="vl"' + (a.out ? ' style="opacity:.5"' : '') + '>' +
+            money(a.v) + '</span></div>';
       }).join('') +
-    '</div></div>';
+    '</div>' +
+    (agreed ? '' : '<div class="score-note" style="margin-top:9px">' +
+      'שיטות ההערכה מגיעות לתוצאות רחוקות מדי זו מזו כדי לקבוע שווי הוגן. ' +
+      'זה קורה כשרווח חשבונאי ותזרים מזומנים חופשי מתפצלים — למשל בחברה ' +
+      'בעיצומן של השקעות הון כבדות.</div>') +
+    '</div>';
 }
 
 function renderLevels(t, price) {
