@@ -158,13 +158,68 @@ def scrape_wikipedia_symbols(session, url, label):
     return out
 
 
+def nasdaq100_from_api(session):
+    """Nasdaq publishes the index membership directly.
+
+    Preferred over Wikipedia because the Nasdaq-100 article no longer carries a
+    components table at all - the only tables left there track index history."""
+    url = "https://api.nasdaq.com/api/quote/list-type/nasdaq100"
+    try:
+        r = session.get(url, timeout=30)
+    except Exception as e:
+        log(f"    Nasdaq API: {type(e).__name__}")
+        return []
+    if r.status_code != 200:
+        log(f"    Nasdaq API: HTTP {r.status_code}")
+        return []
+    try:
+        payload = r.json()
+    except Exception:
+        log("    Nasdaq API: non-JSON response")
+        return []
+
+    # The envelope has shifted before, so hunt for the row list rather than
+    # hard-coding one path through it.
+    def find_rows(node, depth=0):
+        if depth > 6:
+            return None
+        if isinstance(node, list):
+            if node and isinstance(node[0], dict) and "symbol" in node[0]:
+                return node
+            return None
+        if isinstance(node, dict):
+            for key in ("rows", "data", "records", "table"):
+                if key in node:
+                    found = find_rows(node[key], depth + 1)
+                    if found:
+                        return found
+            for v in node.values():
+                found = find_rows(v, depth + 1)
+                if found:
+                    return found
+        return None
+
+    rows = find_rows(payload) or []
+    out, seen = [], set()
+    for row in rows:
+        sym = str(row.get("symbol", "")).strip().upper().replace(".", "-")
+        if TICKER_RE.match(sym) and sym not in seen:
+            seen.add(sym)
+            out.append(sym)
+    log(f"    Nasdaq-100 via Nasdaq API: {len(out)} tickers")
+    return out
+
+
 def build_universe(session):
     log("[1/5] Universe")
     sp = scrape_wikipedia_symbols(
         session, "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
         "S&P 500")
-    nd = scrape_wikipedia_symbols(
-        session, "https://en.wikipedia.org/wiki/Nasdaq-100", "Nasdaq-100")
+    nd = nasdaq100_from_api(session)
+    if len(nd) < 50:
+        log("    falling back to Wikipedia for the Nasdaq-100")
+        nd = scrape_wikipedia_symbols(
+            session, "https://en.wikipedia.org/wiki/Nasdaq-100", "Nasdaq-100")
 
     if not sp or not nd:
         log(f"    WARNING: an index came back empty "
