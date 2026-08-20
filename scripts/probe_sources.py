@@ -10,7 +10,7 @@ Settled so far:
 Still needed: daily OHLCV for ~600 symbols, to compute moving averages, RSI,
 ATR and 52-week position for the screener.
 
-Run:  python scripts/probe_yahoo.py
+Run:  python scripts/probe_sources.py
 """
 import csv
 import io

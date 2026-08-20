@@ -105,7 +105,18 @@ jobs:
           git add data/screener.json data/universe.json
           if git diff --staged --quiet; then
             echo "no changes"
-          else
-            git commit -m "Update screener snapshot [skip ci]"
-            git push
+            exit 0
           fi
+          git commit -m "Update screener snapshot [skip ci]"
+          # The scan takes minutes, so the branch may have moved on underneath
+          # us. Rebase onto whatever landed and try again before giving up.
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:${GITHUB_REF_NAME}"; then
+              echo "pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "push rejected, rebasing onto origin/${GITHUB_REF_NAME}"
+            git pull --rebase origin "${GITHUB_REF_NAME}" || exit 1
+          done
+          echo "could not push after 3 attempts"
+          exit 1

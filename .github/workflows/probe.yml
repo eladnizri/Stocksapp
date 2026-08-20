@@ -7,7 +7,7 @@ on:
   push:
     branches: ['claude/**']
     paths:
-      - 'scripts/probe_yahoo.py'
+      - 'scripts/probe_sources.py'
       - '.github/workflows/probe.yml'
 
 jobs:
@@ -24,4 +24,4 @@ jobs:
         run: pip install --quiet requests
 
       - name: Probe
-        run: python scripts/probe_yahoo.py
+        run: python scripts/probe_sources.py
