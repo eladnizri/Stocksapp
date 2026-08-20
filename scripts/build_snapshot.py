@@ -414,6 +414,9 @@ SIC_RANGES = [
     ((8731, 8731), "בריאות"),
     ((3570, 3579), "טכנולוגיה"), ((3600, 3699), "טכנולוגיה"),
     ((7370, 7379), "טכנולוגיה"), ((3820, 3825), "טכנולוגיה"),
+    # Health insurers file under an insurance SIC, but an investor reads them
+    # as health care. The narrow range wins over 6000-6499.
+    ((6324, 6324), "בריאות"),
     ((6500, 6599), "נדל\u05f4ן"), ((6798, 6798), "נדל\u05f4ן"),
     ((6000, 6499), "פיננסים"), ((6700, 6799), "פיננסים"),
     ((1200, 1399), "אנרגיה"), ((2900, 2999), "אנרגיה"),
@@ -454,82 +457,82 @@ def sector_from_sic(sic):
 
 
 def fetch_sectors(web, sec, symbols, sym_cik):
-    """Sector per symbol, cheapest source first.
+    """Sector per symbol, most trustworthy source first.
 
-    Nasdaq's screener returns the whole market in one request, but the column
-    it exposes is sometimes industry-level ("Aluminum", "Tobacco") which is far
-    too granular to screen on. Take it only when it is genuinely a sector, and
-    fall back to SEC's SIC code for whatever is left."""
+    Nasdaq answers for the whole market in one request, which is tempting, but
+    its taxonomy disagrees with how these companies are normally classified:
+    it filed Agilent, a lab-instruments maker, under industrials rather than
+    health care, sent Sherwin-Williams to consumer rather than materials, and
+    left materials with five names out of the S&P 500's ~25. SEC's SIC code is
+    authoritative and costs one request per company, which a nightly job can
+    afford. Take SIC first and let Nasdaq fill whatever SEC cannot resolve."""
     log("[3/6] Sectors")
     out = {}
-    want = set(symbols)
 
-    try:
-        r = web.get("https://api.nasdaq.com/api/screener/stocks"
-                    "?tableonly=true&limit=25000&download=true", timeout=60)
-        rows = []
-        if r.status_code == 200:
-            payload = r.json()
+    with_cik = [s for s in symbols if s in sym_cik]
+    log(f"    asking SEC for the SIC of {len(with_cik)} companies")
 
-            def find(node, depth=0):
-                if depth > 6:
-                    return None
-                if isinstance(node, list):
-                    if node and isinstance(node[0], dict) and "symbol" in node[0]:
-                        return node
-                    return None
-                if isinstance(node, dict):
-                    for k in ("rows", "data", "records", "table"):
-                        if k in node:
-                            f = find(node[k], depth + 1)
+    def one(sym):
+        cik = sym_cik[sym]
+        try:
+            r = sec.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
+                        timeout=30)
+            if r.status_code != 200:
+                return sym, None
+            return sym, sector_from_sic(r.json().get("sic"))
+        except Exception:
+            return sym, None
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for sym, hebrew in ex.map(one, with_cik):
+            done += 1
+            if hebrew:
+                out[sym] = hebrew
+            if done % 150 == 0:
+                log(f"    ...{done}/{len(with_cik)}, {len(out)} classified")
+    log(f"    SEC classified {len(out)}/{len(symbols)}")
+
+    missing = [s for s in symbols if s not in out]
+    if missing:
+        log(f"    {len(missing)} unresolved; trying Nasdaq")
+        try:
+            r = web.get("https://api.nasdaq.com/api/screener/stocks"
+                        "?tableonly=true&limit=25000&download=true", timeout=60)
+            rows = []
+            if r.status_code == 200:
+                def find(node, depth=0):
+                    if depth > 6:
+                        return None
+                    if isinstance(node, list):
+                        if node and isinstance(node[0], dict) and "symbol" in node[0]:
+                            return node
+                        return None
+                    if isinstance(node, dict):
+                        for k in ("rows", "data", "records", "table"):
+                            if k in node:
+                                f = find(node[k], depth + 1)
+                                if f:
+                                    return f
+                        for v in node.values():
+                            f = find(v, depth + 1)
                             if f:
                                 return f
-                    for v in node.values():
-                        f = find(v, depth + 1)
-                        if f:
-                            return f
-                return None
-
-            rows = find(payload) or []
-        if rows:
-            key = "sector" if "sector" in rows[0] else None
-            log(f"    Nasdaq: {len(rows)} rows, sector column "
-                f"{'present' if key else 'absent'}")
-            if key:
-                for row in rows:
-                    sym = str(row.get("symbol", "")).upper().replace(".", "-")
-                    if sym not in want:
-                        continue
-                    he = NASDAQ_SECTOR_HE.get(str(row.get(key, "")).strip().lower())
-                    if he:
-                        out[sym] = he
-                log(f"    mapped {len(out)} from Nasdaq")
-    except Exception as e:
-        log(f"    Nasdaq sectors unavailable: {type(e).__name__}")
-
-    missing = [s for s in symbols if s not in out and s in sym_cik]
-    if missing:
-        log(f"    {len(missing)} without a sector; asking SEC for their SIC")
-        done = 0
-
-        def one(sym):
-            cik = sym_cik[sym]
-            try:
-                rr = sec.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
-                             timeout=30)
-                if rr.status_code != 200:
-                    return sym, None
-                return sym, sector_from_sic(rr.json().get("sic"))
-            except Exception:
-                return sym, None
-
-        with ThreadPoolExecutor(max_workers=6) as ex:
-            for sym, hebrew in ex.map(one, missing):
-                done += 1
-                if hebrew:
-                    out[sym] = hebrew
-                if done % 150 == 0:
-                    log(f"    ...{done}/{len(missing)}")
+                    return None
+                rows = find(r.json()) or []
+            want = set(missing)
+            added = 0
+            for row in rows:
+                sym = str(row.get("symbol", "")).upper().replace(".", "-")
+                if sym not in want:
+                    continue
+                he = NASDAQ_SECTOR_HE.get(str(row.get("sector", "")).strip().lower())
+                if he:
+                    out[sym] = he
+                    added += 1
+            log(f"    Nasdaq filled {added}")
+        except Exception as e:
+            log(f"    Nasdaq unavailable: {type(e).__name__}")
 
     dist = {}
     for v in out.values():
