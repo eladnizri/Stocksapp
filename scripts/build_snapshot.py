@@ -115,12 +115,14 @@ def build_universe(session):
 # SEC: ticker -> CIK
 # ==========================================================================
 def sec_cik_map(session):
+    """Returns {ticker: (cik, company name)} - the same file carries both."""
     log("[2/5] SEC ticker -> CIK map")
     r = session.get("https://www.sec.gov/files/company_tickers.json", timeout=40)
     r.raise_for_status()
     m = {}
     for row in r.json().values():
-        m[row["ticker"].upper().replace(".", "-")] = int(row["cik_str"])
+        sym = row["ticker"].upper().replace(".", "-")
+        m[sym] = (int(row["cik_str"]), (row.get("title") or "").strip())
     log(f"    {len(m)} tickers mapped")
     return m
 
@@ -610,7 +612,8 @@ def main():
         log(f"    limited to {len(symbols)} symbols")
 
     cik_map = sec_cik_map(sec)
-    sym_cik = {s: cik_map[s] for s in symbols if s in cik_map}
+    sym_cik = {s: cik_map[s][0] for s in symbols if s in cik_map}
+    sym_name = {s: cik_map[s][1] for s in symbols if s in cik_map}
     log(f"    {len(sym_cik)}/{len(symbols)} symbols resolved to a CIK")
 
     facts = collect_fundamentals(sec, set(sym_cik.values()))
@@ -640,11 +643,14 @@ def main():
         raw = facts.get(cik, {})
         f = derive_fundamentals(raw) if raw else {}
         bars = hist.get(sym)
-        t = compute_technicals(bars) if bars else {}
+        # A recent listing can have fewer than 60 closes, and compute_technicals
+        # returns None for those rather than emitting misleading averages.
+        t = (compute_technicals(bars) or {}) if bars else {}
         if not t and not f:
             continue
 
-        r = {"s": sym, "i": sorted(members.get(sym, []))}
+        r = {"s": sym, "n": sym_name.get(sym, ""),
+             "i": sorted(members.get(sym, []))}
         price = t.get("price")
         shares = f.get("shares")
         if price and shares:
@@ -658,7 +664,8 @@ def main():
         if r.get("mcap") and f.get("fcf") and f["fcf"] > 0:
             r["pfcf"] = r["mcap"] / f["fcf"]
 
-        r = {k: round_sig(v) for k, v in r.items() if v is not None}
+        r = {k: (v if isinstance(v, (str, list)) else round_sig(v))
+             for k, v in r.items() if v is not None}
         r["sc"] = score_row({**r, "f": f, "t": t})
         r["f"] = clean(f)
         r["t"] = clean(t)

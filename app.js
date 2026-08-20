@@ -259,16 +259,23 @@ function onSearch(term) {
   if (!term) { box.innerHTML = renderRecent(); return; }
   if (!SNAP) { box.innerHTML = '<div class="msg">טוען נתונים…</div>'; return; }
 
+  /* Rank exact ticker prefixes first, then company-name matches, so typing
+     "MU" surfaces Micron before every company with "mu" in its name. */
   var hits = [];
-  for (var i = 0; i < SNAP.rows.length && hits.length < 25; i++) {
-    var r = SNAP.rows[i];
-    if (r.s.indexOf(term) === 0) hits.push(r);
+  var seen = {};
+  var push = function (r) {
+    if (!seen[r.s]) { seen[r.s] = 1; hits.push(r); }
+  };
+  var rows = SNAP.rows;
+  var i;
+  for (i = 0; i < rows.length && hits.length < 25; i++) {
+    if (rows[i].s.indexOf(term) === 0) push(rows[i]);
   }
-  if (hits.length < 8) {
-    for (var j = 0; j < SNAP.rows.length && hits.length < 25; j++) {
-      var r2 = SNAP.rows[j];
-      if (r2.s.indexOf(term) > 0 && hits.indexOf(r2) < 0) hits.push(r2);
-    }
+  for (i = 0; i < rows.length && hits.length < 25; i++) {
+    if ((rows[i].n || '').toUpperCase().indexOf(term) === 0) push(rows[i]);
+  }
+  for (i = 0; i < rows.length && hits.length < 25; i++) {
+    if ((rows[i].n || '').toUpperCase().indexOf(term) > 0) push(rows[i]);
   }
   if (!hits.length) {
     box.innerHTML = '<div class="msg">לא נמצא. אפשר לנתח כל סימבול —' +
@@ -280,7 +287,8 @@ function onSearch(term) {
     var sc = (r.sc && r.sc.total != null) ? r.sc.total : null;
     return '<button class="res" onclick="analyze(\'' + r.s + '\')">' +
       '<span><span class="sym">' + r.s + '</span>' +
-      '<span class="nm">' + (r.i || []).map(idxLabel).join(' · ') + '</span></span>' +
+      '<span class="nm">' + esc(r.n || (r.i || []).map(idxLabel).join(' · ')) +
+      '</span></span>' +
       '<span class="sc" style="color:' + scoreColor(sc) + '">' +
       (sc == null ? '—' : sc) + '</span></button>';
   }).join('');
@@ -340,6 +348,8 @@ function renderAnalysis(sym, row, quote, targets) {
   var t = (row && row.t) || {};
   var sc = (row && row.sc) || {};
   var price = (q && q.price != null) ? q.price : t.price;
+  // Yahoo's name is richer when present; the snapshot's SEC name always is.
+  var name = (q && q.name) || (row && row.n) || '';
 
   var html = '';
 
@@ -348,7 +358,8 @@ function renderAnalysis(sym, row, quote, targets) {
   html += '<div class="card">' +
     '<div class="q-head">' +
       '<div>' +
-        '<div class="q-name">' + esc(sym) + (q && q.name ? ' · ' + esc(q.name) : '') + '</div>' +
+        '<div class="q-name">' + esc(sym) +
+          (name ? ' · ' + esc(name) : '') + '</div>' +
         '<div class="q-meta">' + ((row && row.i) ? row.i.map(idxLabel).join(' · ') : 'מחוץ למדדים הנסרקים') + '</div>' +
       '</div>' +
       '<div style="text-align:left">' +
@@ -909,6 +920,7 @@ function runScreen() {
         '<span class="hit-score" style="background:' + scoreColor(sc) +
           '22;color:' + scoreColor(sc) + '">' + (sc == null ? '—' : sc) + '</span>' +
         '<span><span class="sym">' + r.s + '</span>' +
+          '<span class="nm">' + esc(r.n || '') + '</span>' +
           '<span class="nm">' + big(r.mcap) + ' · מכפיל ' +
           (r.pe ? num(r.pe, 1) : '—') + '</span></span>' +
         '<span><span class="pr">' + money(t.price) + '</span>' +
@@ -918,10 +930,12 @@ function runScreen() {
 }
 
 /* ------------------------------------------------------------------ home */
+/* Raw Yahoo symbols - yahooQuote() percent-encodes them, so pre-encoding the
+   caret here would double-escape it and every index request would 404. */
 var TICKERS = [
-  ['%5EGSPC', 'S&P 500', 0],
-  ['%5EIXIC', 'נאסד״ק', 0],
-  ['%5EVIX', 'VIX', 2],
+  ['^GSPC', 'S&P 500', 0],
+  ['^IXIC', 'נאסד״ק', 0],
+  ['^VIX', 'VIX', 2],
   ['USDILS=X', 'דולר / שקל', 3],
   ['BTC-USD', 'ביטקוין', 0],
   ['GC=F', 'זהב', 0],
