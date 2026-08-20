@@ -216,7 +216,7 @@ def nasdaq100_from_api(session):
 
 
 def build_universe(session):
-    log("[1/6] Universe")
+    log("[1/8] Universe")
     sp = scrape_wikipedia_symbols(
         session, "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
         "S&P 500")
@@ -253,7 +253,7 @@ def build_universe(session):
 # ==========================================================================
 def sec_cik_map(session):
     """Returns {ticker: (cik, company name)} - the same file carries both."""
-    log("[2/6] SEC ticker -> CIK map")
+    log("[2/8] SEC ticker -> CIK map")
     r = session.get("https://www.sec.gov/files/company_tickers.json", timeout=40)
     r.raise_for_status()
     m = {}
@@ -480,7 +480,7 @@ def fetch_sectors(web, sec, symbols, sym_cik):
     left materials with five names out of the S&P 500's ~25. SEC's SIC code is
     authoritative and costs one request per company, which a nightly job can
     afford. Take SIC first and let Nasdaq fill whatever SEC cannot resolve."""
-    log("[3/6] Sectors")
+    log("[3/8] Sectors")
     out = {}
 
     with_cik = [s for s in symbols if s in sym_cik]
@@ -596,10 +596,100 @@ def fetch_sectors(web, sec, symbols, sym_cik):
     return out
 
 
+# ------------------------------------------------- analysts and earnings
+def fetch_analyst(symbols, workers=6):
+    """Consensus price target and the buy/hold/sell split, per company.
+
+    The app used to ask Yahoo for this from the device, but Yahoo gates that
+    endpoint behind a cookie+crumb, so the card almost always read
+    "unavailable". Nasdaq serves it plainly, and once a night is often enough
+    for a figure that moves on analyst revisions."""
+    log("[4/8] Analyst targets")
+    out = {}
+    lock = threading.Lock()
+    local = threading.local()
+
+    def one(sym):
+        if not hasattr(local, "s"):
+            local.s = web_session()
+        try:
+            r = local.s.get(
+                f"https://api.nasdaq.com/api/analyst/{sym}/targetprice",
+                timeout=25)
+            if r.status_code != 200:
+                return sym, None
+            c = ((r.json().get("data") or {}).get("consensusOverview")) or {}
+        except Exception:
+            return sym, None
+        target = c.get("priceTarget")
+        if not target:
+            return sym, None
+        rec = {"mean": target,
+               "lo": c.get("lowPriceTarget"),
+               "hi": c.get("highPriceTarget"),
+               "buy": c.get("buy"), "hold": c.get("hold"), "sell": c.get("sell")}
+        return sym, {k: v for k, v in rec.items() if v is not None}
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for sym, rec in ex.map(one, symbols):
+            done += 1
+            if rec:
+                with lock:
+                    out[sym] = rec
+            if done % 150 == 0:
+                log(f"    ...{done}/{len(symbols)}, {len(out)} with a target")
+    log(f"    {len(out)}/{len(symbols)} have an analyst target")
+    return out
+
+
+def fetch_earnings_dates(session, days=80):
+    """Next scheduled report date, from Nasdaq's earnings calendar.
+
+    Walking the calendar forward costs one request per weekday and covers every
+    company at once, which is far cheaper than asking per company - and unlike
+    the per-company endpoint it returns a real date rather than prose."""
+    log("[5/8] Earnings calendar")
+    out = {}
+    today = dt.date.today()
+    asked = 0
+    for offset in range(0, days):
+        day = today + dt.timedelta(days=offset)
+        if day.weekday() >= 5:          # nothing is scheduled at the weekend
+            continue
+        asked += 1
+        try:
+            r = session.get(
+                "https://api.nasdaq.com/api/calendar/earnings"
+                f"?date={day.isoformat()}", timeout=25)
+            if r.status_code != 200:
+                continue
+            rows = ((r.json().get("data") or {}).get("rows")) or []
+        except Exception:
+            continue
+        for row in rows:
+            sym = str(row.get("symbol", "")).upper().replace(".", "-")
+            if not sym or sym in out:   # keep the soonest date
+                continue
+            rec = {"d": day.isoformat()}
+            eps = (row.get("epsForecast") or "").strip()
+            if eps:
+                rec["eps"] = eps
+            when = (row.get("time") or "")
+            if "pre" in when:
+                rec["t"] = "pre"
+            elif "after" in when:
+                rec["t"] = "post"
+            out[sym] = rec
+        time.sleep(0.2)
+    log(f"    {asked} weekdays checked, {len(out)} companies scheduled")
+    return out
+
+
 def collect_fundamentals(session, wanted_ciks):
     """Returns {cik: {"q": {...}, "a": {...}, "i": {...}}} where each inner map
     is {metric: [(period, value), ...]} sorted newest first."""
-    log("[4/6] SEC fundamentals via frames")
+    log("[6/8] SEC fundamentals via frames")
     out = {}
 
     def store(cik, bucket, metric, period, val):
@@ -999,9 +1089,12 @@ def main():
 
     sectors = fetch_sectors(web, sec, symbols, sym_cik)
 
+    analyst = fetch_analyst(symbols, workers=args.workers)
+    earnings = fetch_earnings_dates(web)
+
     facts = collect_fundamentals(sec, set(sym_cik.values()))
 
-    log("[5/6] Prices and technicals")
+    log("[7/8] Prices and technicals")
     hist = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(fetch_history, web_session(), s): s for s in symbols}
@@ -1019,7 +1112,7 @@ def main():
                 log(f"    ...{done}/{len(symbols)} fetched, {len(hist)} with data")
     log(f"    {len(hist)}/{len(symbols)} symbols have price history")
 
-    log("[6/6] Assemble")
+    log("[8/8] Assemble")
     rows = []
     for sym in symbols:
         cik = sym_cik.get(sym)
@@ -1036,6 +1129,10 @@ def main():
              "i": sorted(members.get(sym, []))}
         if sectors.get(sym):
             r["sec"] = sectors[sym]
+        if analyst.get(sym):
+            r["an"] = analyst[sym]
+        if earnings.get(sym):
+            r["er"] = earnings[sym]
         price = t.get("price")
         shares = f.get("shares")
         if price and shares:
