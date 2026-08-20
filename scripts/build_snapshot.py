@@ -163,57 +163,89 @@ def fetch_frame(session, taxo, tag, unit, period):
 
 
 # Each metric lists the XBRL tags companies actually use, in preference order.
+# Filers are inconsistent, so every metric needs alternates or coverage craters.
 FLOW_METRICS = {
     "revenue": ("us-gaap", ["RevenueFromContractWithCustomerExcludingAssessedTax",
-                            "Revenues", "SalesRevenueNet"], "USD"),
-    "netIncome": ("us-gaap", ["NetIncomeLoss"], "USD"),
+                            "Revenues", "SalesRevenueNet",
+                            "RevenueFromContractWithCustomerIncludingAssessedTax"],
+                "USD"),
+    "netIncome": ("us-gaap", ["NetIncomeLoss",
+                              "ProfitLoss",
+                              "NetIncomeLossAvailableToCommonStockholdersBasic"],
+                  "USD"),
     "grossProfit": ("us-gaap", ["GrossProfit"], "USD"),
+    "costOfRevenue": ("us-gaap", ["CostOfRevenue", "CostOfGoodsAndServicesSold",
+                                  "CostOfServices"], "USD"),
     "operatingIncome": ("us-gaap", ["OperatingIncomeLoss"], "USD"),
     "opCashFlow": ("us-gaap",
                    ["NetCashProvidedByUsedInOperatingActivities",
                     "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations"],
                    "USD"),
-    "capex": ("us-gaap", ["PaymentsToAcquirePropertyPlantAndEquipment"], "USD"),
-    "eps": ("us-gaap", ["EarningsPerShareDiluted", "EarningsPerShareBasic"],
+    "capex": ("us-gaap", ["PaymentsToAcquirePropertyPlantAndEquipment",
+                          "PaymentsToAcquireProductiveAssets",
+                          "PaymentsToAcquirePropertyPlantAndEquipmentAndIntangibleAssets"],
+              "USD"),
+    "eps": ("us-gaap", ["EarningsPerShareDiluted", "EarningsPerShareBasic",
+                        "EarningsPerShareBasicAndDiluted"],
             "USD-per-shares"),
 }
 
 INSTANT_METRICS = {
     "assets": ("us-gaap", ["Assets"], "USD"),
     "liabilities": ("us-gaap", ["Liabilities"], "USD"),
-    "equity": ("us-gaap", ["StockholdersEquity"], "USD"),
-    "cash": ("us-gaap", ["CashAndCashEquivalentsAtCarryingValue"], "USD"),
+    "equity": ("us-gaap", ["StockholdersEquity",
+                           "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
+               "USD"),
+    "cash": ("us-gaap", ["CashAndCashEquivalentsAtCarryingValue",
+                         "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
+             "USD"),
     "assetsCurrent": ("us-gaap", ["AssetsCurrent"], "USD"),
     "liabilitiesCurrent": ("us-gaap", ["LiabilitiesCurrent"], "USD"),
-    "longTermDebt": ("us-gaap", ["LongTermDebtNoncurrent", "LongTermDebt"], "USD"),
+    "longTermDebt": ("us-gaap", ["LongTermDebtNoncurrent", "LongTermDebt",
+                                 "LongTermDebtAndCapitalLeaseObligations",
+                                 "DebtLongtermAndShorttermCombinedAmount"], "USD"),
     "shares": ("dei", ["EntityCommonStockSharesOutstanding"], "shares"),
 }
 
-# Quarters of flow data to collect: 8 gives a trailing-twelve-month figure plus
-# the year-ago TTM, which is what growth rates need.
+# Quarterly frames are the freshest but sparse: the API buckets by calendar
+# quarter, so any filer on an off-cycle fiscal calendar is simply absent.
+# Annual frames cover far more companies and give clean year-over-year growth,
+# so collect both and prefer whichever is available.
 FLOW_QUARTERS = 9
-INSTANT_QUARTERS = 4
+INSTANT_QUARTERS = 5
+ANNUAL_YEARS = 4
+
+
+def annual_periods(n):
+    """Annual calendar frames, newest first. The current year is never filed
+    yet, so start from last year."""
+    y = dt.date.today().year - 1
+    return [f"CY{y - i}" for i in range(n)]
 
 
 def collect_fundamentals(session, wanted_ciks):
-    """Returns {cik: {metric: [(period, value), ...] newest first}}"""
+    """Returns {cik: {"q": {...}, "a": {...}, "i": {...}}} where each inner map
+    is {metric: [(period, value), ...]} sorted newest first."""
     log("[3/5] SEC fundamentals via frames")
     out = {}
 
-    def store(cik, metric, period, val):
-        out.setdefault(cik, {}).setdefault(metric, []).append((period, val))
+    def store(cik, bucket, metric, period, val):
+        out.setdefault(cik, {}).setdefault(bucket, {}) \
+           .setdefault(metric, []).append((period, val))
 
     jobs = []
     for metric, (taxo, tags, unit) in FLOW_METRICS.items():
         for period in recent_periods(FLOW_QUARTERS, instant=False):
-            jobs.append((metric, taxo, tags, unit, period))
+            jobs.append(("q", metric, taxo, tags, unit, period))
+        for period in annual_periods(ANNUAL_YEARS):
+            jobs.append(("a", metric, taxo, tags, unit, period))
     for metric, (taxo, tags, unit) in INSTANT_METRICS.items():
         for period in recent_periods(INSTANT_QUARTERS, instant=True):
-            jobs.append((metric, taxo, tags, unit, period))
+            jobs.append(("i", metric, taxo, tags, unit, period))
 
     log(f"    {len(jobs)} frame requests")
     hits = 0
-    for i, (metric, taxo, tags, unit, period) in enumerate(jobs):
+    for i, (bucket, metric, taxo, tags, unit, period) in enumerate(jobs):
         data = None
         for tag in tags:
             data = fetch_frame(session, taxo, tag, unit, period)
@@ -226,10 +258,15 @@ def collect_fundamentals(session, wanted_ciks):
         for row in data:
             cik = row.get("cik")
             if cik in wanted_ciks and row.get("val") is not None:
-                store(cik, metric, period, row["val"])
-        if (i + 1) % 25 == 0:
+                store(cik, bucket, metric, period, row["val"])
+        if (i + 1) % 40 == 0:
             log(f"    ...{i + 1}/{len(jobs)} requests, "
                 f"{len(out)} companies with data")
+
+    for cik, buckets in out.items():
+        for bucket in buckets.values():
+            for series in bucket.values():
+                series.sort(key=lambda x: x[0], reverse=True)
 
     log(f"    {hits}/{len(jobs)} frames returned data; "
         f"{len(out)} companies covered")
@@ -248,34 +285,52 @@ def latest(series):
 
 
 def derive_fundamentals(raw):
-    """Turn raw per-quarter facts into the metrics the app displays."""
+    """Turn raw SEC facts into the metrics the app displays.
+
+    Quarterly data is preferred for freshness; annual data fills the many gaps
+    the calendar-quarter bucketing leaves behind, and drives growth rates."""
+    q = raw.get("q", {})
+    a = raw.get("a", {})
+    inst = raw.get("i", {})
     f = {}
-    for metric, series in raw.items():
-        # frames may deliver periods out of order; newest first.
-        series.sort(key=lambda x: x[0], reverse=True)
 
-    rev_ttm = ttm(raw.get("revenue", []))
-    rev_prev = ttm(raw.get("revenue", [])[4:], 4) if \
-        len(raw.get("revenue", [])) >= 8 else None
-    ni_ttm = ttm(raw.get("netIncome", []))
-    ni_prev = ttm(raw.get("netIncome", [])[4:], 4) if \
-        len(raw.get("netIncome", [])) >= 8 else None
-    gp_ttm = ttm(raw.get("grossProfit", []))
-    oi_ttm = ttm(raw.get("operatingIncome", []))
-    ocf_ttm = ttm(raw.get("opCashFlow", []))
-    capex_ttm = ttm(raw.get("capex", []))
-    eps_ttm = ttm(raw.get("eps", []))
-    eps_prev = ttm(raw.get("eps", [])[4:], 4) if \
-        len(raw.get("eps", [])) >= 8 else None
+    def flow(metric):
+        """Trailing twelve months, falling back to the latest full year."""
+        v = ttm(q.get(metric, []))
+        return v if v is not None else latest(a.get(metric, []))
 
-    assets = latest(raw.get("assets", []))
-    liabilities = latest(raw.get("liabilities", []))
-    equity = latest(raw.get("equity", []))
-    cash = latest(raw.get("cash", []))
-    ac = latest(raw.get("assetsCurrent", []))
-    lc = latest(raw.get("liabilitiesCurrent", []))
-    ltd = latest(raw.get("longTermDebt", []))
-    shares = latest(raw.get("shares", []))
+    def yoy(metric):
+        """Year-over-year growth from annual filings, else TTM vs prior TTM."""
+        ann = a.get(metric, [])
+        if len(ann) >= 2 and ann[1][1]:
+            return ((ann[0][1] - ann[1][1]) / abs(ann[1][1])) * 100
+        qs = q.get(metric, [])
+        if len(qs) >= 8:
+            cur, prev = ttm(qs), ttm(qs[4:], 4)
+            if cur is not None and prev:
+                return ((cur - prev) / abs(prev)) * 100
+        return None
+
+    rev_ttm = flow("revenue")
+    ni_ttm = flow("netIncome")
+    gp_ttm = flow("grossProfit")
+    if gp_ttm is None:
+        cor = flow("costOfRevenue")
+        if rev_ttm is not None and cor is not None:
+            gp_ttm = rev_ttm - cor
+    oi_ttm = flow("operatingIncome")
+    ocf_ttm = flow("opCashFlow")
+    capex_ttm = flow("capex")
+    eps_ttm = flow("eps")
+
+    assets = latest(inst.get("assets", []))
+    liabilities = latest(inst.get("liabilities", []))
+    equity = latest(inst.get("equity", []))
+    cash = latest(inst.get("cash", []))
+    ac = latest(inst.get("assetsCurrent", []))
+    lc = latest(inst.get("liabilitiesCurrent", []))
+    ltd = latest(inst.get("longTermDebt", []))
+    shares = latest(inst.get("shares", []))
 
     f["revTTM"] = rev_ttm
     f["niTTM"] = ni_ttm
@@ -302,17 +357,18 @@ def derive_fundamentals(raw):
     f["roe"] = pct(ni_ttm, equity)
     f["roa"] = pct(ni_ttm, assets)
 
-    if equity and ltd is not None:
-        f["debtToEquity"] = (ltd / equity) * 100
-    if lc:
-        f["currentRatio"] = (ac / lc) if ac else None
+    if equity and equity > 0:
+        if ltd is not None:
+            f["debtToEquity"] = (ltd / equity) * 100
+        elif liabilities is not None:
+            # No debt tag filed: total liabilities is a coarser stand-in.
+            f["liabToEquity"] = (liabilities / equity) * 100
+    if lc and ac:
+        f["currentRatio"] = ac / lc
 
-    if rev_ttm is not None and rev_prev:
-        f["revGrowth"] = ((rev_ttm - rev_prev) / abs(rev_prev)) * 100
-    if ni_ttm is not None and ni_prev:
-        f["niGrowth"] = ((ni_ttm - ni_prev) / abs(ni_prev)) * 100
-    if eps_ttm is not None and eps_prev:
-        f["epsGrowth"] = ((eps_ttm - eps_prev) / abs(eps_prev)) * 100
+    f["revGrowth"] = yoy("revenue")
+    f["niGrowth"] = yoy("netIncome")
+    f["epsGrowth"] = yoy("eps")
 
     return {k: v for k, v in f.items() if v is not None}
 
@@ -485,8 +541,12 @@ def score_row(r):
         band(f.get("netMargin"), 0, 30),
         band(f.get("roe"), 0, 35),
     ])
+    leverage = f.get("debtToEquity")
+    if leverage is None and f.get("liabToEquity") is not None:
+        # Total liabilities run much larger than debt alone, so widen the band.
+        leverage = f["liabToEquity"] / 2.5
     health = avg([
-        band(f.get("debtToEquity"), 200, 0),
+        band(leverage, 200, 0),
         band(f.get("currentRatio"), 0.6, 3.0),
         band(f.get("fcfMargin"), -5, 30),
     ])
