@@ -1,0 +1,56 @@
+name: Stamp asset versions
+
+# index.html references app.js and style.css by bare filename, so a browser
+# keeps serving the copies it already has and a deploy can look like it never
+# happened. Stamp each with a content hash on the way in.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'app.js'
+      - 'style.css'
+      - 'index.html'
+      - 'scripts/stamp_assets.py'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stamp-main
+  cancel-in-progress: false
+
+jobs:
+  stamp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Stamp
+        run: python scripts/stamp_assets.py
+
+      - name: Commit if it changed
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add index.html
+          if git diff --staged --quiet; then
+            echo "already current"
+            exit 0
+          fi
+          # [skip ci] keeps this from triggering itself.
+          git commit -m "Stamp asset versions [skip ci]"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "pushed on attempt $attempt"
+              exit 0
+            fi
+            git pull --rebase origin main || exit 1
+          done
+          echo "could not push after 3 attempts"
+          exit 1
