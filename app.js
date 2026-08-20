@@ -402,9 +402,15 @@ function renderAnalysis(sym, row, quote, targets) {
    for that quarter. Shown relative as well as absolute, because "in 3 days"
    is what actually matters when deciding whether to open a position. */
 function earningsLine(er) {
-  if (!er || !er.d) return '';
-  var d = new Date(er.d + 'T12:00:00');
-  if (isNaN(d)) return '';
+  /* Nasdaq publishes report dates only a few weeks out, so between earnings
+     seasons most companies genuinely have none. Say so rather than omitting
+     the row, which reads as a missing feature instead of a missing date. */
+  var d = er && er.d ? new Date(er.d + 'T12:00:00') : null;
+  if (!d || isNaN(d)) {
+    return '<div class="earn"><span class="earn-k">דוח הבא</span>' +
+      '<span class="earn-v" style="color:var(--muted);font-weight:600">' +
+      'טרם פורסם</span></div>';
+  }
   var days = Math.round((d - new Date()) / 86400000);
   var when = days < 0 ? '' : days === 0 ? 'היום'
     : days === 1 ? 'מחר' : 'בעוד ' + days + ' ימים';
