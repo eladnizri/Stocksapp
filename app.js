@@ -10,6 +10,25 @@
  */
 'use strict';
 
+/* The previous version of this app installed a service worker that cached the
+   whole site. It is still registered on any device that opened the old app and
+   would keep serving those files over these ones. Tear it down on every start
+   - unregistering is idempotent, so this costs nothing once it is gone. */
+(function purgeOldServiceWorker() {
+  try {
+    if ('serviceWorker' in navigator && navigator.serviceWorker.getRegistrations) {
+      navigator.serviceWorker.getRegistrations().then(function (regs) {
+        regs.forEach(function (r) { r.unregister(); });
+      }).catch(function () {});
+    }
+    if (window.caches && caches.keys) {
+      caches.keys().then(function (keys) {
+        keys.forEach(function (k) { caches.delete(k); });
+      }).catch(function () {});
+    }
+  } catch (e) {}
+})();
+
 var $ = function (s) { return document.querySelector(s); };
 
 var LS = {
