@@ -441,6 +441,15 @@ SIC_RANGES = [
 ]
 
 
+def submissions_url(cik):
+    """The submissions endpoint needs the CIK zero-padded to ten digits.
+
+    sec_cik_map stores it as a plain int because the frames API keys on that,
+    and passing it through unpadded 404s for every company - which sent every
+    sector to the fallback while looking like it had merely 'errored'."""
+    return f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json"
+
+
 def sector_from_sic(sic):
     """Narrowest matching range wins.
 
@@ -493,9 +502,7 @@ def fetch_sectors(web, sec, symbols, sym_cik):
         for attempt in range(4):
             time.sleep(SECTOR_DELAY)
             try:
-                r = local.s.get(
-                    f"https://data.sec.gov/submissions/CIK{cik}.json",
-                    timeout=30)
+                r = local.s.get(submissions_url(cik), timeout=30)
             except Exception:
                 continue
             if r.status_code in (403, 429, 503):
@@ -532,6 +539,9 @@ def fetch_sectors(web, sec, symbols, sym_cik):
     log(f"    SEC classified {len(out)}/{len(symbols)}  "
         f"(throttled {failures['throttled']}, errors {failures['error']}, "
         f"unmapped SIC {failures['unmapped']})")
+    if with_cik and len(out) < len(with_cik) * 0.8:
+        log(f"    WARNING: SEC resolved only {len(out)}/{len(with_cik)} - the "
+            f"fallback is doing the work, and its taxonomy disagrees")
     if failures["throttled"] > len(with_cik) * 0.02:
         log("    WARNING: throttling is losing companies to the fallback")
     log(f"    SEC classified {len(out)}/{len(symbols)}")
