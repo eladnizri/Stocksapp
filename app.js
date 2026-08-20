@@ -37,7 +37,9 @@ var LS = {
   idx: 'sa_idx',
   snap: 'sa_snap',
   proxy: 'sa_proxy',
-  recent: 'sa_recent'
+  recent: 'sa_recent',
+  screens: 'sa_screens',
+  sectors: 'sa_sectors'
 };
 
 var store = {
@@ -240,7 +242,7 @@ function goTab(name) {
   $('#pages').scrollTop = 0;
 
   if (name === 'watch') { renderAlerts(); checkAlerts(false); renderFilters(); }
-  if (name === 'market') { loadTickers(); renderBreadth(); }
+  if (name === 'market') { loadTickers(); renderBreadth(); renderSectors(); }
 }
 
 /* The analysis lives in a bottom sheet so it can be opened from anywhere
@@ -258,7 +260,7 @@ document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && !$('#sheet').classList.contains('hidden')) closeSheet();
 });
 
-/* ---------------------------------------------------------------- search */
+
 function onSearch(term) {
   var box = $('#results');
   term = (term || '').trim().toUpperCase();
@@ -867,6 +869,8 @@ var FILTERS = [
 ];
 
 function renderFilters() {
+  renderScreens();
+  renderSectorChips();
   var saved = store.get(LS.filters, {});
   $('#filterRows').innerHTML = FILTERS.map(function (f) {
     var v = saved[f[0]] || {};
@@ -898,6 +902,43 @@ function renderFilters() {
   }).join('');
 }
 
+function availableSectors() {
+  var counts = {};
+  if (!SNAP) return counts;
+  SNAP.rows.forEach(function (r) {
+    if (r.sec) counts[r.sec] = (counts[r.sec] || 0) + 1;
+  });
+  return counts;
+}
+
+function renderSectorChips() {
+  var box = $('#secChips');
+  if (!box) return;
+  var counts = availableSectors();
+  var keys = Object.keys(counts).sort(function (a, b) {
+    return counts[b] - counts[a];
+  });
+  if (!keys.length) { box.innerHTML = ''; return; }
+  /* Empty selection means "all", so the screener does not start out excluding
+     everything and reporting no matches. */
+  var on = store.get(LS.sectors, []).filter(function (k) {
+    return keys.indexOf(k) >= 0;
+  });
+  box.innerHTML = keys.map(function (k) {
+    return '<button class="chip ' + (on.indexOf(k) >= 0 ? 'on' : '') +
+      '" onclick="toggleSector(\'' + k + '\')">' + k +
+      ' <span style="opacity:.6">· ' + counts[k] + '</span></button>';
+  }).join('');
+}
+
+function toggleSector(k) {
+  var on = store.get(LS.sectors, []);
+  var i = on.indexOf(k);
+  if (i >= 0) on.splice(i, 1); else on.push(k);
+  store.set(LS.sectors, on);
+  renderSectorChips();
+}
+
 function availableIndices() {
   var counts = {};
   if (!SNAP) return counts;
@@ -920,8 +961,64 @@ function toggleIdx(k) {
 function resetFilters() {
   store.set(LS.filters, {});
   store.set(LS.idx, Object.keys(availableIndices()));
+  store.set(LS.sectors, []);
   renderFilters();
   $('#screenResults').innerHTML = '<div class="msg">הגדר פילטרים ולחץ סרוק.</div>';
+}
+
+/* -------------------------------------------------------- saved screens */
+function savedScreens() { return store.get(LS.screens, []); }
+
+function renderScreens() {
+  var box = $('#savedScreens');
+  if (!box) return;
+  var list = savedScreens();
+  if (!list.length) {
+    box.innerHTML = '<span class="score-note">אין סינונים שמורים. הגדר ' +
+      'פילטרים ולחץ שמור.</span>';
+    return;
+  }
+  box.innerHTML = '<div class="chips">' + list.map(function (sv, i) {
+    return '<span class="chip saved">' +
+      '<button onclick="loadScreen(' + i + ')">' + esc(sv.name) + '</button>' +
+      '<button class="del" onclick="deleteScreen(' + i + ')" ' +
+        'aria-label="מחק ' + esc(sv.name) + '">✕</button></span>';
+  }).join('') + '</div>';
+}
+
+function saveScreen() {
+  var flt = readFilters();
+  if (!Object.keys(flt).length) {
+    $('#screenCount').textContent = 'אין פילטרים לשמור';
+    return;
+  }
+  var name = (prompt('שם לסינון:') || '').trim();
+  if (!name) return;
+  var list = savedScreens();
+  var entry = { name: name, f: flt, i: store.get(LS.idx, []),
+                sec: store.get(LS.sectors, []) };
+  var at = -1;
+  for (var i = 0; i < list.length; i++) if (list[i].name === name) at = i;
+  if (at >= 0) list[at] = entry; else list.push(entry);
+  store.set(LS.screens, list.slice(0, 12));
+  renderScreens();
+}
+
+function loadScreen(i) {
+  var sv = savedScreens()[i];
+  if (!sv) return;
+  store.set(LS.filters, sv.f || {});
+  if (sv.i && sv.i.length) store.set(LS.idx, sv.i);
+  store.set(LS.sectors, sv.sec || []);
+  renderFilters();
+  runScreen();
+}
+
+function deleteScreen(i) {
+  var list = savedScreens();
+  list.splice(i, 1);
+  store.set(LS.screens, list);
+  renderScreens();
 }
 
 function readFilters() {
@@ -956,18 +1053,26 @@ function runScreen() {
   if (!SNAP) { box.innerHTML = '<div class="msg">הנתונים עדיין נטענים…</div>'; return; }
 
   var flt = readFilters();
-  var keys = Object.keys(availableIndices());
-  var idx = store.get(LS.idx, keys).filter(function (k) {
-    return keys.indexOf(k) >= 0;
+  var idxKeys = Object.keys(availableIndices());
+  var idx = store.get(LS.idx, idxKeys).filter(function (k) {
+    return idxKeys.indexOf(k) >= 0;
   });
-  if (!idx.length) idx = keys;
-  var keys = Object.keys(flt);
+  if (!idx.length) idx = idxKeys;
+
+  // No sector selected means no sector constraint, not "exclude everything".
+  var secKeys = Object.keys(availableSectors());
+  var sectors = store.get(LS.sectors, []).filter(function (k) {
+    return secKeys.indexOf(k) >= 0;
+  });
+
+  var fields = Object.keys(flt);
 
   var hits = SNAP.rows.filter(function (r) {
     var inIdx = (r.i || []).some(function (m) { return idx.indexOf(m) >= 0; });
     if (!inIdx) return false;
-    for (var i = 0; i < keys.length; i++) {
-      var k = keys[i], c = flt[k], v = fieldValue(r, k);
+    if (sectors.length && sectors.indexOf(r.sec) < 0) return false;
+    for (var i = 0; i < fields.length; i++) {
+      var k = fields[i], c = flt[k], v = fieldValue(r, k);
       if (v == null) return false;
       if (c.min != null && v < c.min) return false;
       if (c.max != null && v > c.max) return false;
@@ -1172,6 +1277,54 @@ function clearCache() {
 }
 
 /* ------------------------------------------------------------------ boot */
+/* Sector strength, from the snapshot. Ranks sectors by the median 1-month
+   return of their members - median rather than mean so one runaway stock does
+   not carry a whole sector. */
+function renderSectors() {
+  var el = $('#sectors');
+  if (!el) return;
+  if (!SNAP || !SNAP.rows.length) {
+    el.innerHTML = '<div class="msg">אין נתונים.</div>';
+    return;
+  }
+  var by = {};
+  SNAP.rows.forEach(function (r) {
+    if (!r.sec || !r.t || r.t.chg1m == null) return;
+    (by[r.sec] = by[r.sec] || []).push(r.t.chg1m);
+  });
+  var names = Object.keys(by).filter(function (k) { return by[k].length >= 5; });
+  if (!names.length) {
+    el.innerHTML = '<div class="msg">נתוני הסקטורים יתווספו בסריקה הבאה.</div>';
+    return;
+  }
+  var median = function (xs) {
+    var a = xs.slice().sort(function (x, y) { return x - y; });
+    var m = Math.floor(a.length / 2);
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  };
+  var rows = names.map(function (k) {
+    return { k: k, v: median(by[k]), n: by[k].length };
+  }).sort(function (a, b) { return b.v - a.v; });
+
+  var span = Math.max.apply(null, rows.map(function (r) {
+    return Math.abs(r.v);
+  })) || 1;
+
+  el.innerHTML = rows.map(function (r) {
+    var w = Math.max(3, (Math.abs(r.v) / span) * 100);
+    var col = r.v >= 0 ? 'var(--ok)' : 'var(--alert)';
+    return '<div class="bd-row">' +
+      '<span class="bd-lb">' + r.k + '</span>' +
+      '<span class="bd-track"><i class="bd-fill" style="width:' +
+        w.toFixed(0) + '%;background:' + col + '"></i></span>' +
+      '<span class="bd-vl" style="color:' + col + '">' + pct(r.v, 1) +
+      '</span></div>';
+  }).join('') +
+  '<div class="bd-sum">חציון תשואת חודש בכל סקטור. ' +
+    '<b>' + rows[0].k + '</b> מוביל, <b>' + rows[rows.length - 1].k +
+    '</b> נחלש.</div>';
+}
+
 function greet() {
   var h = new Date().getHours();
   return h < 5 ? 'לילה טוב' : h < 12 ? 'בוקר טוב'
@@ -1184,6 +1337,7 @@ function boot() {
   loadTickers();
   loadSnapshot().then(function () {
     renderBreadth();
+    renderSectors();
     checkAlerts(false);
   });
 }

@@ -211,7 +211,7 @@ def nasdaq100_from_api(session):
 
 
 def build_universe(session):
-    log("[1/5] Universe")
+    log("[1/6] Universe")
     sp = scrape_wikipedia_symbols(
         session, "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
         "S&P 500")
@@ -248,7 +248,7 @@ def build_universe(session):
 # ==========================================================================
 def sec_cik_map(session):
     """Returns {ticker: (cik, company name)} - the same file carries both."""
-    log("[2/5] SEC ticker -> CIK map")
+    log("[2/6] SEC ticker -> CIK map")
     r = session.get("https://www.sec.gov/files/company_tickers.json", timeout=40)
     r.raise_for_status()
     m = {}
@@ -367,10 +367,183 @@ def annual_periods(n):
     return [f"CY{y - i}" for i in range(n)]
 
 
+# ---------------------------------------------------------------- sectors
+# Ten buckets, chosen to be the ones an investor actually screens on. Nasdaq's
+# own labels and SEC's SIC ranges both fold into these.
+SECTORS = ["טכנולוגיה", "בריאות", "פיננסים", "נדל\u05f4ן", "אנרגיה",
+           "תשתיות", "תקשורת", "צריכה", "תעשייה", "חומרים"]
+
+NASDAQ_SECTOR_HE = {
+    "technology": "טכנולוגיה",
+    "computer and technology": "טכנולוגיה",
+    "health care": "בריאות",
+    "healthcare": "בריאות",
+    "medical": "בריאות",
+    "finance": "פיננסים",
+    "financials": "פיננסים",
+    "real estate": "נדל\u05f4ן",
+    "energy": "אנרגיה",
+    "oils/energy": "אנרגיה",
+    "utilities": "תשתיות",
+    "public utilities": "תשתיות",
+    "telecommunications": "תקשורת",
+    "telecommunication": "תקשורת",
+    "communication services": "תקשורת",
+    "consumer discretionary": "צריכה",
+    "consumer staples": "צריכה",
+    "consumer durables": "צריכה",
+    "consumer non-durables": "צריכה",
+    "consumer services": "צריכה",
+    "retail trade": "צריכה",
+    "retail-wholesale": "צריכה",
+    "industrials": "תעשייה",
+    "industrial applications and services": "תעשייה",
+    "capital goods": "תעשייה",
+    "transportation": "תעשייה",
+    "basic materials": "חומרים",
+    "basic industries": "חומרים",
+    "materials": "חומרים",
+}
+
+# SIC is organised by product, not by market sector, so the ranges have to be
+# picked deliberately: pharma sits inside Chemicals, and software inside
+# Business Services.
+SIC_RANGES = [
+    ((2833, 2836), "בריאות"), ((3826, 3827), "בריאות"),
+    ((3840, 3851), "בריאות"), ((8000, 8099), "בריאות"),
+    ((8731, 8731), "בריאות"),
+    ((3570, 3579), "טכנולוגיה"), ((3600, 3699), "טכנולוגיה"),
+    ((7370, 7379), "טכנולוגיה"), ((3820, 3825), "טכנולוגיה"),
+    ((6500, 6599), "נדל\u05f4ן"), ((6798, 6798), "נדל\u05f4ן"),
+    ((6000, 6499), "פיננסים"), ((6700, 6799), "פיננסים"),
+    ((1200, 1399), "אנרגיה"), ((2900, 2999), "אנרגיה"),
+    ((4600, 4699), "אנרגיה"),
+    ((4900, 4999), "תשתיות"),
+    ((2700, 2799), "תקשורת"), ((4800, 4899), "תקשורת"),
+    ((7810, 7841), "תקשורת"),
+    ((2000, 2199), "צריכה"), ((2300, 2399), "צריכה"),
+    ((5000, 5999), "צריכה"), ((7000, 7099), "צריכה"),
+    ((7900, 7999), "צריכה"),
+    ((2800, 2899), "חומרים"), ((1000, 1099), "חומרים"),
+    ((1400, 1499), "חומרים"), ((2400, 2699), "חומרים"),
+    ((3300, 3399), "חומרים"),
+    ((1500, 1799), "תעשייה"), ((3400, 3569), "תעשייה"),
+    ((3580, 3599), "תעשייה"), ((3700, 3799), "תעשייה"),
+    ((4000, 4599), "תעשייה"), ((8700, 8730), "תעשייה"),
+]
+
+
+def sector_from_sic(sic):
+    """Narrowest matching range wins.
+
+    Some ranges deliberately sit inside others - pharma (2833-2836) inside
+    chemicals, REITs (6798) inside finance - and the specific one must win.
+    Picking by width says so outright instead of depending on list order, which
+    a later edit could reorder without anyone noticing."""
+    try:
+        code = int(sic)
+    except (TypeError, ValueError):
+        return None
+    best, best_width = None, None
+    for (lo, hi), name in SIC_RANGES:
+        if lo <= code <= hi:
+            width = hi - lo
+            if best_width is None or width < best_width:
+                best, best_width = name, width
+    return best
+
+
+def fetch_sectors(web, sec, symbols, sym_cik):
+    """Sector per symbol, cheapest source first.
+
+    Nasdaq's screener returns the whole market in one request, but the column
+    it exposes is sometimes industry-level ("Aluminum", "Tobacco") which is far
+    too granular to screen on. Take it only when it is genuinely a sector, and
+    fall back to SEC's SIC code for whatever is left."""
+    log("[3/6] Sectors")
+    out = {}
+    want = set(symbols)
+
+    try:
+        r = web.get("https://api.nasdaq.com/api/screener/stocks"
+                    "?tableonly=true&limit=25000&download=true", timeout=60)
+        rows = []
+        if r.status_code == 200:
+            payload = r.json()
+
+            def find(node, depth=0):
+                if depth > 6:
+                    return None
+                if isinstance(node, list):
+                    if node and isinstance(node[0], dict) and "symbol" in node[0]:
+                        return node
+                    return None
+                if isinstance(node, dict):
+                    for k in ("rows", "data", "records", "table"):
+                        if k in node:
+                            f = find(node[k], depth + 1)
+                            if f:
+                                return f
+                    for v in node.values():
+                        f = find(v, depth + 1)
+                        if f:
+                            return f
+                return None
+
+            rows = find(payload) or []
+        if rows:
+            key = "sector" if "sector" in rows[0] else None
+            log(f"    Nasdaq: {len(rows)} rows, sector column "
+                f"{'present' if key else 'absent'}")
+            if key:
+                for row in rows:
+                    sym = str(row.get("symbol", "")).upper().replace(".", "-")
+                    if sym not in want:
+                        continue
+                    he = NASDAQ_SECTOR_HE.get(str(row.get(key, "")).strip().lower())
+                    if he:
+                        out[sym] = he
+                log(f"    mapped {len(out)} from Nasdaq")
+    except Exception as e:
+        log(f"    Nasdaq sectors unavailable: {type(e).__name__}")
+
+    missing = [s for s in symbols if s not in out and s in sym_cik]
+    if missing:
+        log(f"    {len(missing)} without a sector; asking SEC for their SIC")
+        done = 0
+
+        def one(sym):
+            cik = sym_cik[sym]
+            try:
+                rr = sec.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
+                             timeout=30)
+                if rr.status_code != 200:
+                    return sym, None
+                return sym, sector_from_sic(rr.json().get("sic"))
+            except Exception:
+                return sym, None
+
+        with ThreadPoolExecutor(max_workers=6) as ex:
+            for sym, hebrew in ex.map(one, missing):
+                done += 1
+                if hebrew:
+                    out[sym] = hebrew
+                if done % 150 == 0:
+                    log(f"    ...{done}/{len(missing)}")
+
+    dist = {}
+    for v in out.values():
+        dist[v] = dist.get(v, 0) + 1
+    log(f"    {len(out)}/{len(symbols)} symbols have a sector")
+    for k, v in sorted(dist.items(), key=lambda x: -x[1]):
+        log(f"      {v:4}  {k}")
+    return out
+
+
 def collect_fundamentals(session, wanted_ciks):
     """Returns {cik: {"q": {...}, "a": {...}, "i": {...}}} where each inner map
     is {metric: [(period, value), ...]} sorted newest first."""
-    log("[3/5] SEC fundamentals via frames")
+    log("[4/6] SEC fundamentals via frames")
     out = {}
 
     def store(cik, bucket, metric, period, val):
@@ -768,9 +941,11 @@ def main():
     sym_name = {s: cik_map[s][1] for s in symbols if s in cik_map}
     log(f"    {len(sym_cik)}/{len(symbols)} symbols resolved to a CIK")
 
+    sectors = fetch_sectors(web, sec, symbols, sym_cik)
+
     facts = collect_fundamentals(sec, set(sym_cik.values()))
 
-    log("[4/5] Prices and technicals")
+    log("[5/6] Prices and technicals")
     hist = {}
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
         futs = {ex.submit(fetch_history, web_session(), s): s for s in symbols}
@@ -788,7 +963,7 @@ def main():
                 log(f"    ...{done}/{len(symbols)} fetched, {len(hist)} with data")
     log(f"    {len(hist)}/{len(symbols)} symbols have price history")
 
-    log("[5/5] Assemble")
+    log("[6/6] Assemble")
     rows = []
     for sym in symbols:
         cik = sym_cik.get(sym)
@@ -803,6 +978,8 @@ def main():
 
         r = {"s": sym, "n": sym_name.get(sym, ""),
              "i": sorted(members.get(sym, []))}
+        if sectors.get(sym):
+            r["sec"] = sectors[sym]
         price = t.get("price")
         shares = f.get("shares")
         if price and shares:

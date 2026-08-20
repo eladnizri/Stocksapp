@@ -215,6 +215,15 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   font-size: .8rem; font-weight: 700;
 }
 .chip.on { background: var(--primary); color: #fff; }
+/* A saved screen is one chip carrying two targets: load, and delete. */
+.chip.saved { display: inline-flex; align-items: center; gap: 0; padding: 0; }
+.chip.saved > button {
+  padding: 7px 6px 7px 13px; font: inherit; font-weight: 700; color: inherit;
+}
+.chip.saved > button.del {
+  padding: 7px 11px 7px 6px; color: var(--muted); font-size: .78rem;
+}
+.chip.saved > button.del:active { color: var(--alert); }
 .chip:active { transform: scale(.95); }
 
 /* ----------------------------------------------------------------- modal */
