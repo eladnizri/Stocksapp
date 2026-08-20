@@ -83,10 +83,10 @@ function cls(v) { return v > 0 ? 'up' : v < 0 ? 'down' : ''; }
 
 /* Colour ramp for 0..100 scores: red -> brass -> green. */
 function scoreColor(v) {
-  if (v == null) return 'var(--ink-mute)';
+  if (v == null) return 'var(--muted)';
   if (v >= 70) return 'var(--gain)';
   if (v >= 50) return '#7E9A3C';
-  if (v >= 30) return 'var(--brass)';
+  if (v >= 30) return 'var(--watch)';
   return 'var(--loss)';
 }
 function scoreVerdict(v) {
@@ -220,43 +220,49 @@ function useSnapshot(d, isCache) {
   SNAP_BY_SYM = {};
   for (var i = 0; i < d.rows.length; i++) SNAP_BY_SYM[d.rows[i].s] = d.rows[i];
   renderDataStatus(null, isCache);
-  var uc = $('#uniCount');
+  var uc = $('#screenCount');
   if (uc) uc.textContent = d.rows.length + ' מניות';
 }
 
 /* ------------------------------------------------------------ navigation */
-var TITLES = {
-  analyze: ['ניתוח פונדמנטלי', 'ניתוח מניות'],
-  screen: ['סינון לפי פרמטרים', 'סורק מניות'],
-  alerts: ['מחירי יעד', 'התראות'],
-  home: ['סקירה', 'בית']
-};
-
 function goTab(name) {
   var pages = document.querySelectorAll('.page');
   for (var i = 0; i < pages.length; i++) pages[i].classList.remove('on');
-  var el = $('#page-' + name);
+  var el = $('#p-' + name);
   if (el) el.classList.add('on');
 
   var tabs = document.querySelectorAll('.tab');
   for (var j = 0; j < tabs.length; j++) {
-    tabs[j].classList.toggle('on', tabs[j].dataset.page === name);
+    var on = tabs[j].dataset.page === name;
+    tabs[j].classList.toggle('on', on);
+    if (on) $('#tabbar').style.setProperty('--tab-idx', j);
   }
-  var t = TITLES[name] || TITLES.analyze;
-  $('#topKicker').textContent = t[0];
-  $('#topTitle').textContent = t[1];
-  window.scrollTo(0, 0);
+  $('#pages').scrollTop = 0;
 
-  if (name === 'alerts') { renderAlerts(); checkAlerts(false); }
-  if (name === 'home') loadTickers();
-  if (name === 'screen') renderFilters();
+  if (name === 'watch') { renderAlerts(); checkAlerts(false); renderFilters(); }
+  if (name === 'market') { loadTickers(); renderBreadth(); }
 }
+
+/* The analysis lives in a bottom sheet so it can be opened from anywhere
+   without losing the page underneath. */
+function openSheet() {
+  $('#sheet').classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+function closeSheet() {
+  $('#sheet').classList.add('hidden');
+  document.body.style.overflow = '';
+  CUR = null;
+}
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape' && !$('#sheet').classList.contains('hidden')) closeSheet();
+});
 
 /* ---------------------------------------------------------------- search */
 function onSearch(term) {
-  var box = $('#qResults');
+  var box = $('#results');
   term = (term || '').trim().toUpperCase();
-  if (!term) { box.innerHTML = renderRecent(); return; }
+  if (!term) { box.innerHTML = ''; renderRecent(); return; }
   if (!SNAP) { box.innerHTML = '<div class="msg">טוען נתונים…</div>'; return; }
 
   /* Rank exact ticker prefixes first, then company-name matches, so typing
@@ -285,12 +291,11 @@ function onSearch(term) {
   }
   box.innerHTML = hits.map(function (r) {
     var sc = (r.sc && r.sc.total != null) ? r.sc.total : null;
-    return '<button class="res" onclick="analyze(\'' + r.s + '\')">' +
-      '<span><span class="sym">' + r.s + '</span>' +
-      '<span class="nm">' + esc(r.n || (r.i || []).map(idxLabel).join(' · ')) +
-      '</span></span>' +
+    return '<button class="hit" onclick="analyze(\'' + r.s + '\')">' +
+      '<span class="sym">' + r.s + '</span>' +
+      '<span class="nm">' + esc(r.n || (r.i || []).map(idxLabel).join(' · ')) + '</span>' +
       '<span class="sc" style="color:' + scoreColor(sc) + '">' +
-      (sc == null ? '—' : sc) + '</span></button>';
+        (sc == null ? '—' : sc) + '</span></button>';
   }).join('');
 }
 
@@ -298,12 +303,15 @@ function idxLabel(i) { return i === 'sp500' ? 'S&P 500' : i === 'ndx' ? 'נאס�
 
 function renderRecent() {
   var rec = store.get(LS.recent, []);
-  if (!rec.length) return '';
-  return rec.slice(0, 6).map(function (s) {
-    return '<button class="res" onclick="analyze(\'' + esc(s) + '\')">' +
-      '<span class="sym">' + esc(s) + '</span>' +
-      '<span class="nm">אחרונים</span></button>';
-  }).join('');
+  var box = $('#recentWrap');
+  if (!box) return '';
+  box.innerHTML = rec.length
+    ? '<div class="chips">' + rec.slice(0, 8).map(function (s) {
+        return '<button class="chip" onclick="analyze(\'' + esc(s) + '\')">' +
+          esc(s) + '</button>';
+      }).join('') + '</div>'
+    : '';
+  return '';
 }
 
 function pushRecent(sym) {
@@ -320,9 +328,11 @@ function analyze(sym) {
   if (!sym) return;
   CUR = sym;
   pushRecent(sym);
-  $('#q').value = sym;
-  $('#qResults').innerHTML = '';
-  goTab('analyze');
+  renderRecent();
+  $('#results').innerHTML = '';
+  $('#q').blur();
+  openSheet();
+  $('.modal-sheet').scrollTop = 0;
 
   var row = SNAP_BY_SYM[sym] || null;
   renderAnalysis(sym, row, null, null);
@@ -357,28 +367,36 @@ function renderAnalysis(sym, row, quote, targets) {
   var chgPct = q ? q.chgPct : t.chg1d;
   html += '<div class="card">' +
     '<div class="q-head">' +
-      '<div>' +
-        '<div class="q-name">' + esc(sym) +
-          (name ? ' · ' + esc(name) : '') + '</div>' +
-        '<div class="q-meta">' + ((row && row.i) ? row.i.map(idxLabel).join(' · ') : 'מחוץ למדדים הנסרקים') + '</div>' +
+      '<div style="display:flex;align-items:flex-start;gap:10px">' +
+        '<div style="flex:1;min-width:0">' +
+          '<div class="q-name">' + esc(sym) + '</div>' +
+          '<div class="q-sub">' + (name ? esc(name) + ' · ' : '') +
+            ((row && row.i && row.i.length) ? row.i.map(idxLabel).join(' · ')
+                                            : 'מחוץ למדדים הנסרקים') + '</div>' +
+        '</div>' +
+        '<button class="icon-btn" onclick="closeSheet()" aria-label="סגור">' +
+          '<svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>' +
+        '</button>' +
       '</div>' +
-      '<div style="text-align:left">' +
-        '<div class="q-price mono">' + (price == null ? '<span class="skel" style="width:90px;height:26px"></span>' : money(price)) + '</div>' +
-        '<div class="q-chg mono ' + cls(chgPct) + '">' + pct(chgPct) + '</div>' +
+      '<div class="q-price">' +
+        (price == null ? '<span class="skel" style="width:120px;height:30px"></span>'
+                       : money(price)) + '</div>' +
+      '<div class="q-chg ' + cls(chgPct) + '">' + pct(chgPct) + '</div>' +
+      '<div class="q-meta">' +
+        '<div class="d"><span class="lb">שווי שוק</span>' +
+          '<span class="vl">' + big(row && row.mcap) + '</span></div>' +
+        '<div class="d"><span class="lb">מכפיל רווח</span>' +
+          '<span class="vl">' + (row && row.pe ? num(row.pe, 1) : '—') + '</span></div>' +
+        '<div class="d"><span class="lb">תשואה 12ח</span>' +
+          '<span class="vl ' + cls(t.chg12m) + '">' + pct(t.chg12m, 1) + '</span></div>' +
       '</div>' +
-    '</div>' +
-    '<div class="q-sub">' +
-      '<div>שווי שוק<b class="mono">' + big(row && row.mcap) + '</b></div>' +
-      '<div>מכפיל רווח<b class="mono">' + (row && row.pe ? num(row.pe, 1) : '—') + '</b></div>' +
-      '<div>תשואה 12ח<b class="mono ' + cls(t.chg12m) + '">' + pct(t.chg12m, 1) + '</b></div>' +
-      '<div>ATR<b class="mono">' + (t.atrPct ? num(t.atrPct, 1) + '%' : '—') + '</b></div>' +
     '</div></div>';
 
   if (!row) {
     html += '<div class="card"><div class="msg">' + esc(sym) +
       ' אינה במדדים הנסרקים (S&P 500 / נאסד״ק 100), ולכן אין לה ניתוח יסוד. ' +
       'המחיר החי מוצג למעלה.</div></div>';
-    $('#analyzeBody').innerHTML = html;
+    $('#sheetBody').innerHTML = html;
     return;
   }
 
@@ -411,7 +429,7 @@ function renderAnalysis(sym, row, quote, targets) {
       esc(SNAP.generated.slice(0, 10)) + '</div>';
   }
 
-  $('#analyzeBody').innerHTML = html;
+  $('#sheetBody').innerHTML = html;
 }
 
 function renderScoreCard(sc) {
@@ -426,16 +444,16 @@ function renderScoreCard(sc) {
   ];
 
   return '<div class="card">' +
-    '<div class="card-h"><span>ציון כולל</span><span class="sub">0–100</span></div>' +
+    '<div class="card-h"><span>ציון כולל</span><span class="sub mono">0–100</span></div>' +
     '<div class="score-top">' +
       '<div class="score-ring">' +
         '<svg width="74" height="74">' +
-          '<circle cx="37" cy="37" r="32" fill="none" stroke="var(--paper-3)" stroke-width="7"/>' +
+          '<circle cx="37" cy="37" r="32" fill="none" stroke="var(--surface-2)" stroke-width="7"/>' +
           '<circle cx="37" cy="37" r="32" fill="none" stroke="' + col + '" stroke-width="7"' +
             ' stroke-linecap="round" stroke-dasharray="' + (C * frac) + ' ' + C + '"/>' +
         '</svg>' +
-        '<div class="val"><span class="n" style="color:' + col + '">' +
-          (total == null ? '—' : total) + '</span><span class="d">מתוך 100</span></div>' +
+        '<div class="val" style="color:' + col + '">' +
+          (total == null ? '—' : total) + '</div>' +
       '</div>' +
       '<div><div class="score-verdict" style="color:' + col + '">' +
         scoreVerdict(total) + '</div>' +
@@ -448,7 +466,7 @@ function renderScoreCard(sc) {
         '<span class="lb">' + p[0] + '</span>' +
         '<span class="bar-track"><i class="bar-fill" style="width:' +
           (v == null ? 0 : v) + '%;background:' + scoreColor(v) + '"></i></span>' +
-        '<span class="nv" style="color:' + scoreColor(v) + '">' +
+        '<span class="vl" style="color:' + scoreColor(v) + '">' +
           (v == null ? '—' : v) + '</span></div>';
     }).join('') + '</div></div>';
 }
@@ -516,10 +534,10 @@ function renderValuation(row, price, tg) {
 
   var verdict = gap > 25 ? 'זול משמעותית' : gap > 8 ? 'זול' :
     gap > -8 ? 'קרוב לשווי הוגן' : gap > -25 ? 'יקר' : 'יקר משמעותית';
-  var vcol = gap > 8 ? 'var(--gain)' : gap > -8 ? 'var(--brass)' : 'var(--loss)';
+  var vcol = gap > 8 ? 'var(--gain)' : gap > -8 ? 'var(--watch)' : 'var(--loss)';
   if (!agreed) {
     verdict = 'השיטות לא מסכימות';
-    vcol = 'var(--ink-soft)';
+    vcol = 'var(--ink-2)';
   }
 
   return '<div class="card">' +
@@ -533,7 +551,7 @@ function renderValuation(row, price, tg) {
         // The gradient runs cheap-to-expensive left-to-right in physical space,
         // and CSS gradients ignore RTL, so these must be placed from the left.
         '<div class="val-scale">' +
-          '<i class="val-mark" style="left:' + posFair + '%;background:var(--teal)" data-l="הוגן"></i>' +
+          '<i class="val-mark" style="left:' + posFair + '%;background:var(--primary-500)" data-l="הוגן"></i>' +
           '<i class="val-mark" style="left:' + posPrice + '%" data-l="מחיר"></i>' +
         '</div>' +
         '<div class="val-ends"><span>יקר</span><span>זול</span></div>' +
@@ -648,7 +666,7 @@ function renderFundamentals(row) {
     out += metricRow(r[0], v, r[2], r[3], r[4], r[5]);
   });
 
-  var extra = '<div class="q-sub" style="border-top:1px solid var(--line-soft);margin-top:10px">' +
+  var extra = '<div class="q-sub" style="border-top:1px solid var(--line);margin-top:10px">' +
     '<div>הכנסות (12ח)<b class="mono">' + big(f.revTTM) + '</b></div>' +
     '<div>רווח נקי<b class="mono">' + big(f.niTTM) + '</b></div>' +
     '<div>תזרים חופשי<b class="mono">' + big(f.fcf) + '</b></div>' +
@@ -675,7 +693,7 @@ function renderTechnicals(t, price) {
   return '<div class="card">' +
     '<div class="card-h"><span>טכני</span><span class="sub">ללא גרפים</span></div>' +
     '<div class="mtable">' + rows + '</div>' +
-    '<div class="q-sub" style="border-top:1px solid var(--line-soft);margin-top:10px">' +
+    '<div class="q-sub" style="border-top:1px solid var(--line);margin-top:10px">' +
       perf.map(function (p) {
         return '<div>' + p[0] + '<b class="mono ' + cls(p[1]) + '">' +
           pct(p[1], 1) + '</b></div>';
@@ -713,14 +731,14 @@ function renderForecast(tg, price) {
       '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">יעד נמוך</span>' +
         '<span class="vl">' + money(tg.low) + '</span></div>' +
       '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">יעד ממוצע</span>' +
-        '<span class="vl" style="color:var(--teal)">' + money(tg.mean) +
+        '<span class="vl" style="color:var(--primary-500)">' + money(tg.mean) +
         (up == null ? '' : ' (' + pct(up, 0) + ')') + '</span></div>' +
       '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">יעד גבוה</span>' +
         '<span class="vl">' + money(tg.high) + '</span></div>' + earn +
     '</div>' +
     (total ? '<div class="bars" style="margin-top:11px">' +
       bar('קנייה', tg.buy, 'var(--gain)') +
-      bar('החזקה', tg.hold, 'var(--brass)') +
+      bar('החזקה', tg.hold, 'var(--watch)') +
       bar('מכירה', tg.sell, 'var(--loss)') + '</div>' : '') +
     '</div>';
 }
@@ -757,19 +775,17 @@ function saveAlert(sym, price, dir) {
 }
 
 function addAlert() {
-  var sym = ($('#alSym').value || '').trim().toUpperCase();
-  var price = parseFloat($('#alPrice').value);
-  var dir = window._alDir || 'above';
-  var msg = $('#alMsg');
+  var sym = ($('#a-sym').value || '').trim().toUpperCase();
+  var price = parseFloat($('#a-price').value);
+  var dir = $('#a-dir').value;
+  var note = $('#alertCount');
   if (!sym || !price || isNaN(price)) {
-    msg.innerHTML = '<div class="msg err">צריך סימבול ומחיר יעד.</div>';
+    note.textContent = 'צריך סימבול ומחיר';
     return;
   }
   saveAlert(sym, price, dir);
-  $('#alSym').value = '';
-  $('#alPrice').value = '';
-  msg.innerHTML = '<div class="msg">נוספה התראה ל־' + esc(sym) + '.</div>';
-  setTimeout(function () { msg.innerHTML = ''; }, 2500);
+  $('#a-sym').value = '';
+  $('#a-price').value = '';
 }
 
 function removeAlert(i) {
@@ -779,20 +795,10 @@ function removeAlert(i) {
   renderAlerts();
 }
 
-function renderDirChips() {
-  window._alDir = window._alDir || 'above';
-  $('#alDir').innerHTML =
-    '<button class="chip ' + (window._alDir === 'above' ? 'on' : '') +
-      '" onclick="setDir(\'above\')">עולה מעל ↑</button>' +
-    '<button class="chip ' + (window._alDir === 'below' ? 'on' : '') +
-      '" onclick="setDir(\'below\')">יורד מתחת ↓</button>';
-}
-function setDir(d) { window._alDir = d; renderDirChips(); }
-
+/* Last known price per alerted symbol. Seeded from the snapshot so a row
+   shows something immediately, then refreshed live. */
 var ALERT_PRICES = {};
 
-/* Show the snapshot's closing price straight away so an alert is evaluated
-   the moment it is created; the live quote refines it a beat later. */
 function seedAlertPrices(list) {
   list.forEach(function (a) {
     if (ALERT_PRICES[a.s] != null) return;
@@ -802,27 +808,28 @@ function seedAlertPrices(list) {
 }
 
 function renderAlerts() {
-  renderDirChips();
   var list = store.get(LS.alerts, []);
   seedAlertPrices(list);
-  var box = $('#alertList');
+  var box = $('#alertsList');
   if (!list.length) {
     box.innerHTML = '<div class="msg">אין התראות עדיין.</div>';
+    $('#alertCount').textContent = '';
     return;
   }
   box.innerHTML = list.map(function (a, i) {
     var now = ALERT_PRICES[a.s];
     var hit = now != null &&
       ((a.d === 'above' && now >= a.p) || (a.d === 'below' && now <= a.p));
-    return '<div class="alert ' + (hit ? 'hit-on' : '') + '">' +
-      '<div><span class="sym">' + esc(a.s) + '</span>' +
-        (hit ? ' <span class="badge on">הופעלה</span>' : '') +
-        '<div class="cond">' + (a.d === 'above' ? 'מעל' : 'מתחת ל') + ' ' +
-        money(a.p) + '</div></div>' +
-      '<span class="now">' + (now == null ? '…' : money(now)) + '</span>' +
+    return '<div class="alert ' + (hit ? 'hit' : '') + '">' +
+      '<span class="sym">' + esc(a.s) + '</span>' +
+      '<span class="cond">' + (a.d === 'above' ? 'מעל' : 'מתחת ל־') + ' ' +
+        money(a.p) + '</span>' +
+      (hit ? '<span class="badge">הופעלה</span>' : '') +
+      '<span class="pr">' + (now == null ? '…' : money(now)) + '</span>' +
       '<button class="x" onclick="removeAlert(' + i + ')" aria-label="מחק">✕</button>' +
       '</div>';
   }).join('');
+  $('#alertCount').textContent = list.length + ' פעילות';
 }
 
 function checkAlerts(force) {
@@ -887,7 +894,7 @@ function renderFilters() {
   $('#idxChips').innerHTML = keys.map(function (k) {
     return '<button class="chip ' + (idx.indexOf(k) >= 0 ? 'on' : '') +
       '" onclick="toggleIdx(\'' + k + '\')">' + idxLabel(k) +
-      ' <span style="opacity:.65">' + counts[k] + '</span></button>';
+      ' <span style="opacity:.6">· ' + counts[k] + '</span></button>';
   }).join('');
 }
 
@@ -1005,38 +1012,113 @@ function runScreen() {
 var TICKERS = [
   ['^GSPC', 'S&P 500', 0],
   ['^IXIC', 'נאסד״ק', 0],
+  ['^DJI', 'דאו ג׳ונס', 0],
+  ['^RUT', 'ראסל 2000', 0],
   ['^VIX', 'VIX', 2],
+  ['BTC-USD', 'ביטקוין', 0]
+];
+var TICKERS_MINI = [
   ['USDILS=X', 'דולר / שקל', 3],
-  ['BTC-USD', 'ביטקוין', 0],
   ['GC=F', 'זהב', 0],
   ['CL=F', 'נפט', 2]
 ];
+
+function tkId(sym) { return 'tk-' + sym.replace(/[^A-Za-z0-9]/g, ''); }
 
 function loadTickers() {
   var box = $('#tickers');
   if (box.dataset.loaded) return;
   box.dataset.loaded = '1';
-  box.innerHTML = TICKERS.map(function (t) {
-    return '<div class="tk" id="tk-' + t[0].replace(/[^A-Za-z0-9]/g, '') + '">' +
-      '<span class="lb">' + t[1] + '</span>' +
-      '<span class="vl"><span class="skel" style="width:70px;height:13px"></span></span>' +
-      '</div>';
-  }).join('');
 
-  TICKERS.forEach(function (t) {
+  var tile = function (t, cl) {
+    return '<div class="' + cl + '" id="' + tkId(t[0]) + '">' +
+      '<span class="nm">' + t[1] + '</span>' +
+      '<span class="skel"></span></div>';
+  };
+  box.innerHTML = TICKERS.map(function (t) { return tile(t, 'tk'); }).join('');
+  $('#tickersMini').innerHTML =
+    TICKERS_MINI.map(function (t) { return tile(t, 'tk-mini'); }).join('');
+
+  TICKERS.concat(TICKERS_MINI).forEach(function (t) {
     yahooQuote(t[0]).then(function (q) {
-      var el = $('#tk-' + t[0].replace(/[^A-Za-z0-9]/g, ''));
-      if (!el || q.price == null) return;
-      el.querySelector('.vl').innerHTML = num(q.price, t[2]) +
-        ' <span class="' + cls(q.chgPct) + '" style="font-size:12px">' +
-        pct(q.chgPct, 1) + '</span>';
+      var el = $('#' + tkId(t[0]));
+      if (!el) return;
+      var sk = el.querySelector('.skel');
+      if (sk) sk.remove();
+      if (q.price == null) { el.innerHTML += '<span class="val">—</span>'; return; }
+      el.innerHTML += '<span class="val">' + num(q.price, t[2]) + '</span>' +
+        '<span class="ch ' + cls(q.chgPct) + '">' + pct(q.chgPct, 1) + '</span>';
     }).catch(function () {
-      var el = $('#tk-' + t[0].replace(/[^A-Za-z0-9]/g, ''));
-      if (el) el.querySelector('.vl').textContent = '—';
+      var el = $('#' + tkId(t[0]));
+      if (!el) return;
+      var sk = el.querySelector('.skel');
+      if (sk) sk.remove();
+      el.innerHTML += '<span class="val">—</span>';
     });
   });
-  $('#tkStamp').textContent = new Date().toLocaleTimeString('he-IL',
+
+  $('#mktState').textContent = 'עודכן ' + new Date().toLocaleTimeString('he-IL',
     { hour: '2-digit', minute: '2-digit' });
+}
+
+/* Market breadth, derived from the nightly snapshot.
+   How many of the ~500 companies are above their own moving averages says more
+   about the market's health than the index level does, because a handful of
+   very large companies can carry an index while most of it falls. Costs
+   nothing: every input is already in the snapshot. */
+function renderBreadth() {
+  var el = $('#breadth');
+  if (!el) return;
+  if (!SNAP || !SNAP.rows.length) {
+    el.innerHTML = '<div class="msg">אין נתונים.</div>';
+    return;
+  }
+  var rows = SNAP.rows.filter(function (r) { return r.t && r.t.price != null; });
+  $('#bdCount').textContent = rows.length;
+
+  var share = function (test) {
+    var have = rows.filter(function (r) { return test(r) !== null; });
+    if (!have.length) return null;
+    var yes = have.filter(function (r) { return test(r) === true; });
+    return (yes.length / have.length) * 100;
+  };
+  var above = function (key) {
+    return function (r) {
+      if (r.t[key] == null || r.t.price == null) return null;
+      return r.t.price > r.t[key];
+    };
+  };
+
+  var m50 = share(above('ma50'));
+  var m200 = share(above('ma200'));
+  var up = share(function (r) {
+    return r.t.chg1d == null ? null : r.t.chg1d > 0;
+  });
+  var near = share(function (r) {
+    return r.t.from52High == null ? null : r.t.from52High > -2;
+  });
+
+  var bar = function (label, v, note) {
+    if (v == null) return '';
+    var col = v >= 60 ? 'var(--ok)' : v >= 40 ? 'var(--watch)' : 'var(--alert)';
+    return '<div class="bd-row">' +
+      '<span class="bd-lb">' + label + '</span>' +
+      '<span class="bd-track"><i class="bd-fill" style="width:' +
+        v.toFixed(0) + '%;background:' + col + '"></i></span>' +
+      '<span class="bd-vl">' + v.toFixed(0) + '%</span></div>';
+  };
+
+  var tone = m200 == null ? null
+    : m200 >= 60 ? ['רחב וחיובי', 'רוב המניות מעל הממוצע ארוך הטווח שלהן.']
+    : m200 >= 40 ? ['מעורב', 'השוק חצוי בין מגמה עולה ליורדת.']
+    : ['צר ושלילי', 'רוב המניות מתחת לממוצע ארוך הטווח שלהן.'];
+
+  el.innerHTML =
+    bar('מעל ממוצע 50', m50) +
+    bar('מעל ממוצע 200', m200) +
+    bar('עלו היום', up) +
+    bar('קרוב לשיא שנתי', near) +
+    (tone ? '<div class="bd-sum"><b>' + tone[0] + '</b> · ' + tone[1] + '</div>' : '');
 }
 
 function renderDataStatus(err, isCache) {
@@ -1062,9 +1144,9 @@ function renderDataStatus(err, isCache) {
 }
 
 function openSettings() {
-  goTab('home');
-  var el = $('#dataCard');
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  goTab('watch');
+  var el = $('#dataStatus');
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function refreshSnapshot() {
@@ -1090,11 +1172,18 @@ function clearCache() {
 }
 
 /* ------------------------------------------------------------------ boot */
+function greet() {
+  var h = new Date().getHours();
+  return h < 5 ? 'לילה טוב' : h < 12 ? 'בוקר טוב'
+       : h < 17 ? 'צהריים טובים' : h < 21 ? 'ערב טוב' : 'לילה טוב';
+}
+
 function boot() {
+  $('#greet').textContent = greet();
   renderFilters();
-  renderDirChips();
+  loadTickers();
   loadSnapshot().then(function () {
-    onSearch($('#q').value);
+    renderBreadth();
     checkAlerts(false);
   });
 }
