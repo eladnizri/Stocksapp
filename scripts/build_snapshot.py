@@ -19,6 +19,7 @@ import math
 import os
 import re
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from html.parser import HTMLParser
@@ -35,6 +36,10 @@ BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 
 # SEC asks for <=10 requests/second. Stay well under.
 SEC_DELAY = 0.12
+# Per-thread pause for the one-request-per-company sector lookup:
+# SECTOR_WORKERS / SECTOR_DELAY must stay below 10 requests/second.
+SECTOR_WORKERS = 4
+SECTOR_DELAY = 0.5
 
 
 def log(msg):
@@ -472,25 +477,63 @@ def fetch_sectors(web, sec, symbols, sym_cik):
     with_cik = [s for s in symbols if s in sym_cik]
     log(f"    asking SEC for the SIC of {len(with_cik)} companies")
 
+    # SEC asks for no more than 10 requests a second. The first version fired
+    # six threads with no pause and no retry, so a large share came back 403,
+    # returned None, and were silently filled in by Nasdaq's wrong answer -
+    # which is exactly how Agilent ended up in industrials. Stay under the
+    # limit, retry the throttled ones, and count what still fails.
+    failures = {"throttled": 0, "error": 0, "unmapped": 0}
+    lock = threading.Lock()
+    local = threading.local()
+
     def one(sym):
+        if not hasattr(local, "s"):
+            local.s = sec_session()
         cik = sym_cik[sym]
-        try:
-            r = sec.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
-                        timeout=30)
+        for attempt in range(4):
+            time.sleep(SECTOR_DELAY)
+            try:
+                r = local.s.get(
+                    f"https://data.sec.gov/submissions/CIK{cik}.json",
+                    timeout=30)
+            except Exception:
+                continue
+            if r.status_code in (403, 429, 503):
+                time.sleep(1.5 * (attempt + 1))
+                continue
             if r.status_code != 200:
+                with lock:
+                    failures["error"] += 1
                 return sym, None
-            return sym, sector_from_sic(r.json().get("sic"))
-        except Exception:
-            return sym, None
+            try:
+                sic = r.json().get("sic")
+            except Exception:
+                with lock:
+                    failures["error"] += 1
+                return sym, None
+            hebrew = sector_from_sic(sic)
+            if hebrew is None:
+                with lock:
+                    failures["unmapped"] += 1
+                log(f"      unmapped SIC {sic} for {sym}")
+            return sym, hebrew
+        with lock:
+            failures["throttled"] += 1
+        return sym, None
 
     done = 0
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=SECTOR_WORKERS) as ex:
         for sym, hebrew in ex.map(one, with_cik):
             done += 1
             if hebrew:
                 out[sym] = hebrew
             if done % 150 == 0:
                 log(f"    ...{done}/{len(with_cik)}, {len(out)} classified")
+    log(f"    SEC classified {len(out)}/{len(symbols)}  "
+        f"(throttled {failures['throttled']}, errors {failures['error']}, "
+        f"unmapped SIC {failures['unmapped']})")
+    if failures["throttled"] > len(with_cik) * 0.02:
+        log("    WARNING: throttling is losing companies to the fallback")
     log(f"    SEC classified {len(out)}/{len(symbols)}")
 
     missing = [s for s in symbols if s not in out]

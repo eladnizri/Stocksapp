@@ -152,12 +152,18 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   gap: 8px; margin-top: 10px;
 }
 .tk-mini {
-  background: var(--surface-2); border-radius: var(--r-sm);
+  border-radius: var(--r-sm);
   padding: 9px 10px; text-align: center;
+  min-height: 0;
 }
-.tk-mini .nm { font-size: .68rem; }
-.tk-mini .val { font-size: .95rem; margin-top: 3px; }
-.tk-mini .ch { font-size: .68rem; }
+.tk-mini .nm {
+  font-size: .68rem;
+  display: block; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.tk-mini .val { font-size: .95rem; margin-top: 2px; }
+.tk-mini .ch { display: block; font-size: .68rem; margin-top: 1px; }
+.tk-mini .skel { height: 15px; margin-top: 4px; }
 
 /* --------------------------------------------------------------- breadth */
 .bd-row {
@@ -354,21 +360,31 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 /* ---------------------------------------------------------------- alerts */
 .alert {
-  display: flex; align-items: center; gap: 11px;
-  padding: 13px 14px; border-radius: var(--r-md);
+  display: grid; grid-template-columns: 1fr auto;
+  align-items: center; gap: 10px;
+  padding: 12px 13px; border-radius: var(--r-md);
   background: var(--surface-2); margin-bottom: 9px;
 }
+.alert .a-main { min-width: 0; }
+/* The price rides on the symbol's line and is pushed to the far edge, which
+   leaves the whole second line for the condition - squeezed beside the price
+   it was being truncated to an ellipsis. */
+.alert .a-top { display: flex; align-items: baseline; gap: 7px; }
+.alert .a-top .pr { margin-inline-start: auto; }
 .alert:last-child { margin-bottom: 0; }
-.alert.hit { background: rgba(47, 158, 106, .12); }
-.alert .sym { font-weight: 800; font-size: .95rem; width: 58px; flex: none; }
-.alert .cond { font-size: .8rem; color: var(--ink-2); flex: 1; }
+/* Named 'on', not 'hit': .hit is the screener result row, whose own grid
+   would otherwise override this one and crush the first column. */
+.alert.on { background: rgba(47, 158, 106, .12); }
+.alert .sym { font-weight: 800; font-size: .95rem; }
+.alert .cond { font-size: .78rem; color: var(--ink-2); margin-top: 3px; }
 .alert .pr {
   font-weight: 800; font-variant-numeric: tabular-nums;
-  direction: ltr; unicode-bidi: isolate; font-size: .9rem;
+  direction: ltr; unicode-bidi: isolate; font-size: .95rem;
+  white-space: nowrap;
 }
 .alert .badge {
-  font-size: .68rem; font-weight: 800; padding: 3px 8px; border-radius: 999px;
-  background: var(--ok); color: #fff;
+  font-size: .66rem; font-weight: 800; padding: 3px 8px; border-radius: 999px;
+  background: var(--ok); color: #fff; flex: none;
 }
 .alert .x {
   width: 28px; height: 28px; border-radius: 9px; flex: none;
@@ -376,7 +392,27 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   background: var(--surface); font-size: 1rem; font-weight: 700;
 }
 
-.frow { display: flex; gap: 9px; margin-bottom: 10px; }
+.frow { display: flex; gap: 9px; margin-bottom: 10px; align-items: center; }
+/* A flex row keeps the info button beside the label instead of letting it
+   wrap onto a line of its own when the label takes two lines. */
+.frow .lb {
+  display: flex; align-items: center; gap: 5px;
+  font-size: .82rem; font-weight: 600; color: var(--ink-2);
+}
+.frow .lb-t { min-width: 0; }
+.info {
+  display: inline-grid; place-items: center;
+  width: 17px; height: 17px; border-radius: 999px;
+  background: var(--surface-2); color: var(--ink-2);
+  font-size: .64rem; font-weight: 800; font-style: italic;
+  border: 1px solid var(--border); flex: none;
+}
+.info:active { background: var(--primary); color: #fff; }
+.fhelp {
+  font-size: .76rem; line-height: 1.6; color: var(--ink-2);
+  background: var(--surface-2); border-inline-start: 3px solid var(--primary);
+  border-radius: 10px; padding: 10px 12px; margin: -3px 0 12px;
+}
 .frow > * { flex: 1; min-width: 0; }
 .frow input, .frow select {
   width: 100%; font: inherit; font-size: .92rem; font-weight: 500; color: var(--ink);

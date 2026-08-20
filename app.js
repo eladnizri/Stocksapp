@@ -822,12 +822,16 @@ function renderAlerts() {
     var now = ALERT_PRICES[a.s];
     var hit = now != null &&
       ((a.d === 'above' && now >= a.p) || (a.d === 'below' && now <= a.p));
-    return '<div class="alert ' + (hit ? 'hit' : '') + '">' +
-      '<span class="sym">' + esc(a.s) + '</span>' +
-      '<span class="cond">' + (a.d === 'above' ? 'מעל' : 'מתחת ל־') + ' ' +
-        money(a.p) + '</span>' +
-      (hit ? '<span class="badge">הופעלה</span>' : '') +
-      '<span class="pr">' + (now == null ? '…' : money(now)) + '</span>' +
+    return '<div class="alert ' + (hit ? 'on' : '') + '">' +
+      '<div class="a-main">' +
+        '<div class="a-top">' +
+          '<span class="sym">' + esc(a.s) + '</span>' +
+          (hit ? '<span class="badge">הופעלה</span>' : '') +
+          '<span class="pr">' + (now == null ? '…' : money(now)) + '</span>' +
+        '</div>' +
+        '<div class="cond">' + (a.d === 'above' ? 'מעל' : 'מתחת ל־') + ' ' +
+          money(a.p) + '</div>' +
+      '</div>' +
       '<button class="x" onclick="removeAlert(' + i + ')" aria-label="מחק">✕</button>' +
       '</div>';
   }).join('');
@@ -855,17 +859,38 @@ function checkAlerts(force) {
 
 /* -------------------------------------------------------------- screener */
 var FILTERS = [
-  ['score', 'ציון כולל', 0, 100],
-  ['mcapB', 'שווי שוק (מיליארד $)', 0, 5000],
-  ['pe', 'מכפיל רווח', 0, 100],
-  ['revGrowth', 'צמיחת הכנסות %', -50, 200],
-  ['netMargin', 'מרג׳ין נקי %', -50, 100],
-  ['roe', 'תשואה על ההון %', -50, 150],
-  ['debtToEquity', 'חוב להון %', 0, 500],
-  ['rsi', 'RSI', 0, 100],
-  ['vma200', 'מעל ממוצע 200 %', -80, 200],
-  ['from52High', 'מרחק משיא 52ש׳ %', -90, 0],
-  ['chg12m', 'תשואה 12ח %', -90, 500]
+  ['score', 'ציון כולל', 0, 100,
+   'הציון שלנו, 0 עד 100, משוקלל מחמישה ממדים: תמחור, צמיחה, רווחיות, ' +
+   'איתנות פיננסית ומומנטום. גבוה = החברה נראית טוב יותר בכל הממדים יחד.'],
+  ['mcapB', 'שווי שוק (מיליארד $)', 0, 5000,
+   'שווי כל החברה בבורסה — מחיר המניה כפול מספר המניות. מסנן לפי גודל: ' +
+   'חברות גדולות בדרך כלל יציבות יותר, קטנות תנודתיות יותר.'],
+  ['pe', 'מכפיל רווח', 0, 100,
+   'מחיר המניה חלקי הרווח השנתי למניה — כמה שנים של רווח נוכחי משלמים ' +
+   'עליה. נמוך נחשב זול, אבל לפעמים משקף ציפייה שהרווח עומד לרדת. ' +
+   'חברות בהפסד לא מקבלות מכפיל כלל.'],
+  ['revGrowth', 'צמיחת הכנסות %', -50, 200,
+   'בכמה אחוזים גדלו ההכנסות לעומת השנה הקודמת. מודד אם העסק מתרחב.'],
+  ['netMargin', 'מרג׳ין נקי %', -50, 100,
+   'איזה אחוז מההכנסות נשאר כרווח אחרי כל ההוצאות, הריבית והמסים. ' +
+   'גבוה = החברה שומרת יותר מכל שקל מכירות.'],
+  ['roe', 'תשואה על ההון %', -50, 150,
+   'כמה רווח החברה מייצרת על כל שקל של הון עצמי. מודד עד כמה ההנהלה ' +
+   'מנצלת ביעילות את כספי בעלי המניות.'],
+  ['debtToEquity', 'חוב להון %', 0, 500,
+   'היחס בין החוב הפיננסי להון העצמי. גבוה = מינוף גדול יותר, כלומר ' +
+   'רגישות גבוהה יותר לריבית ולהאטה.'],
+  ['rsi', 'RSI', 0, 100,
+   'מדד תנופה טכני, 0 עד 100, שמשווה ימי עליות לימי ירידות בחודש וחצי ' +
+   'האחרונים. מעל 70 נחשב קנוי־יתר, מתחת ל־30 מכור־יתר.'],
+  ['vma200', 'מעל ממוצע 200 %', -80, 200,
+   'בכמה אחוזים המחיר מעל או מתחת לממוצע 200 הימים. מעל = מגמה ארוכת ' +
+   'טווח עולה, מתחת = יורדת.'],
+  ['from52High', 'מרחק משיא 52ש׳ %', -90, 0,
+   'כמה אחוזים המחיר רחוק מהשיא של 12 החודשים האחרונים. תמיד אפס או ' +
+   'שלילי — אפס אומר שהמניה בשיא.'],
+  ['chg12m', 'תשואה 12ח %', -90, 500,
+   'שינוי המחיר ב־12 החודשים האחרונים, בלי דיבידנדים.']
 ];
 
 function renderFilters() {
@@ -875,12 +900,17 @@ function renderFilters() {
   $('#filterRows').innerHTML = FILTERS.map(function (f) {
     var v = saved[f[0]] || {};
     return '<div class="frow">' +
-      '<span class="lb">' + f[1] + '</span>' +
+      '<span class="lb"><span class="lb-t">' + f[1] + '</span>' +
+        (f[4] ? '<button class="info" onclick="toggleHelp(\'' + f[0] +
+          '\')" aria-label="הסבר על ' + f[1] + '">i</button>' : '') +
+      '</span>' +
       '<input id="f-' + f[0] + '-min" inputmode="decimal" placeholder="מ־" value="' +
         (v.min != null ? v.min : '') + '">' +
       '<input id="f-' + f[0] + '-max" inputmode="decimal" placeholder="עד" value="' +
         (v.max != null ? v.max : '') + '">' +
-      '</div>';
+      '</div>' +
+      (f[4] ? '<div class="fhelp" id="h-' + f[0] + '" hidden>' + f[4] +
+        '</div>' : '');
   }).join('');
 
   /* Build the index chips from what the snapshot actually contains, so an
@@ -1021,6 +1051,11 @@ function deleteScreen(i) {
   renderScreens();
 }
 
+function toggleHelp(key) {
+  var el = $('#h-' + key);
+  if (el) el.hidden = !el.hidden;
+}
+
 function readFilters() {
   var out = {};
   FILTERS.forEach(function (f) {
@@ -1142,7 +1177,7 @@ function loadTickers() {
   };
   box.innerHTML = TICKERS.map(function (t) { return tile(t, 'tk'); }).join('');
   $('#tickersMini').innerHTML =
-    TICKERS_MINI.map(function (t) { return tile(t, 'tk-mini'); }).join('');
+    TICKERS_MINI.map(function (t) { return tile(t, 'tk tk-mini'); }).join('');
 
   TICKERS.concat(TICKERS_MINI).forEach(function (t) {
     yahooQuote(t[0]).then(function (q) {
