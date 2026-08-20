@@ -4,6 +4,11 @@ name: Probe data sources
 # runner, and which fields they populate, before relying on them.
 on:
   workflow_dispatch:
+  push:
+    branches: ['claude/**']
+    paths:
+      - 'scripts/probe_yahoo.py'
+      - '.github/workflows/probe.yml'
 
 jobs:
   probe:
