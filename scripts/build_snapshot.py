@@ -114,37 +114,47 @@ def scrape_wikipedia_symbols(session, url, label):
     p = WikiTableParser()
     p.feed(r.text)
 
+    def column(table, idx):
+        vals = []
+        for row in table[1:]:
+            if idx < len(row):
+                vals.append(row[idx].strip().upper())
+        return vals
+
     best = []
     for table in p.tables:
         if len(table) < 20:
             continue
         header = [h.lower() for h in table[0]]
-        col = None
-        for i, h in enumerate(header):
-            if "ticker" in h or "symbol" in h:
-                col = i
-                break
-        if col is None:
-            continue
-        syms = []
-        for row in table[1:]:
-            if col >= len(row):
+        width = max(len(r) for r in table)
+
+        # Prefer a column the header names, but do not depend on it - header
+        # wording differs between these pages. Fall back to whichever column
+        # actually looks like tickers.
+        ordered = [i for i, h in enumerate(header)
+                   if "ticker" in h or "symbol" in h]
+        ordered += [i for i in range(width) if i not in ordered]
+
+        for idx in ordered:
+            vals = column(table, idx)
+            if not vals:
                 continue
-            cell = row[col].strip().upper()
-            if TICKER_RE.match(cell):
-                syms.append(cell.replace(".", "-"))
-        if len(syms) > len(best):
-            best = syms
+            good = [v for v in vals if TICKER_RE.match(v)]
+            if len(good) < 20 or len(good) / len(vals) < 0.8:
+                continue
+            if len(good) > len(best):
+                best = [g.replace(".", "-") for g in good]
+            break
 
     out, seen = [], set()
     for s in best:
         if s not in seen:
             seen.add(s)
             out.append(s)
-    log(f"    {label}: {len(out)} tickers "
-        f"({len(p.tables)} wikitables on page)")
+    log(f"    {label}: {len(out)} tickers ({len(p.tables)} wikitables)")
     if not out:
-        raise SystemExit(f"could not read the {label} constituents table")
+        for t in p.tables:
+            log(f"      unmatched table: {len(t)} rows, header={t[0][:6]}")
     return out
 
 
@@ -155,6 +165,10 @@ def build_universe(session):
         "S&P 500")
     nd = scrape_wikipedia_symbols(
         session, "https://en.wikipedia.org/wiki/Nasdaq-100", "Nasdaq-100")
+
+    if not sp or not nd:
+        log(f"    WARNING: an index came back empty "
+            f"(sp500={len(sp)}, ndx={len(nd)}); its filter will match nothing")
 
     members = {}
     for s in sp:

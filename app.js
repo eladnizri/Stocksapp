@@ -827,26 +827,47 @@ function renderFilters() {
       '</div>';
   }).join('');
 
-  var idx = store.get(LS.idx, ['sp500', 'ndx']);
-  $('#idxChips').innerHTML = [['sp500', 'S&P 500'], ['ndx', 'נאסד״ק 100']]
-    .map(function (o) {
-      return '<button class="chip ' + (idx.indexOf(o[0]) >= 0 ? 'on' : '') +
-        '" onclick="toggleIdx(\'' + o[0] + '\')">' + o[1] + '</button>';
-    }).join('');
+  /* Build the index chips from what the snapshot actually contains, so an
+     index that failed to scrape never shows up as a filter matching nothing. */
+  var counts = availableIndices();
+  var keys = Object.keys(counts);
+  if (!keys.length) {
+    $('#idxChips').innerHTML = '<span class="score-note">אין נתוני מדדים.</span>';
+    return;
+  }
+  var idx = store.get(LS.idx, keys).filter(function (k) {
+    return keys.indexOf(k) >= 0;
+  });
+  if (!idx.length) idx = keys.slice();
+  $('#idxChips').innerHTML = keys.map(function (k) {
+    return '<button class="chip ' + (idx.indexOf(k) >= 0 ? 'on' : '') +
+      '" onclick="toggleIdx(\'' + k + '\')">' + idxLabel(k) +
+      ' <span style="opacity:.65">' + counts[k] + '</span></button>';
+  }).join('');
+}
+
+function availableIndices() {
+  var counts = {};
+  if (!SNAP) return counts;
+  SNAP.rows.forEach(function (r) {
+    (r.i || []).forEach(function (k) { counts[k] = (counts[k] || 0) + 1; });
+  });
+  return counts;
 }
 
 function toggleIdx(k) {
-  var idx = store.get(LS.idx, ['sp500', 'ndx']);
+  var keys = Object.keys(availableIndices());
+  var idx = store.get(LS.idx, keys);
   var i = idx.indexOf(k);
   if (i >= 0) idx.splice(i, 1); else idx.push(k);
-  if (!idx.length) idx = ['sp500', 'ndx'];
+  if (!idx.length) idx = keys.slice();
   store.set(LS.idx, idx);
   renderFilters();
 }
 
 function resetFilters() {
   store.set(LS.filters, {});
-  store.set(LS.idx, ['sp500', 'ndx']);
+  store.set(LS.idx, Object.keys(availableIndices()));
   renderFilters();
   $('#screenResults').innerHTML = '<div class="msg">הגדר פילטרים ולחץ סרוק.</div>';
 }
@@ -883,7 +904,11 @@ function runScreen() {
   if (!SNAP) { box.innerHTML = '<div class="msg">הנתונים עדיין נטענים…</div>'; return; }
 
   var flt = readFilters();
-  var idx = store.get(LS.idx, ['sp500', 'ndx']);
+  var keys = Object.keys(availableIndices());
+  var idx = store.get(LS.idx, keys).filter(function (k) {
+    return keys.indexOf(k) >= 0;
+  });
+  if (!idx.length) idx = keys;
   var keys = Object.keys(flt);
 
   var hits = SNAP.rows.filter(function (r) {
