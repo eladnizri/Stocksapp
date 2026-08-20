@@ -1,299 +1,273 @@
 #!/usr/bin/env python3
-"""Diagnostic probe: determine exactly which free data sources work from a
-GitHub Actions runner, and which fields they actually populate.
+"""Diagnostic probe: find a free data stack that works from a datacenter IP.
 
-This exists because the data layer for the whole app rests on Yahoo's
-undocumented endpoints. Rather than guess, we run this once on the real
-runner and read the report.
+Round 1 established that Yahoo hard-blocks GitHub runners (429 on every
+endpoint, including the cookie bootstrap). Yahoo still works fine from the
+user's phone, so it stays as the on-device source - but the nightly 600-symbol
+scan needs providers that tolerate server IPs.
+
+Candidates under test:
+  SEC EDGAR  - official, free, no key, explicitly allows automated access.
+               The `frames` API returns one financial concept for EVERY filer
+               in a single request, which is the only way to cover 600 symbols
+               without 600x the traffic.
+  Stooq      - free daily OHLCV as CSV, no key. Covers the technicals.
+  Wikipedia  - constituent lists (already confirmed working).
 
 Run:  python scripts/probe_yahoo.py
 """
+import csv
+import io
 import json
 import sys
 import time
 
 import requests
 
-UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-
-SYMBOLS = ["MU", "AAPL", "NVDA"]
-
-MODULES = [
-    "price", "summaryDetail", "financialData", "defaultKeyStatistics",
-    "assetProfile", "recommendationTrend", "earningsTrend", "calendarEvents",
-]
-
-# The fields the analysis page and screener actually need, grouped by module.
-NEEDED = {
-    "price": ["regularMarketPrice", "regularMarketChangePercent", "shortName",
-              "longName", "currency", "exchangeName"],
-    "summaryDetail": ["marketCap", "trailingPE", "forwardPE", "dividendYield",
-                      "beta", "fiftyTwoWeekLow", "fiftyTwoWeekHigh",
-                      "fiftyDayAverage", "twoHundredDayAverage",
-                      "averageVolume", "priceToSalesTrailing12Months"],
-    "financialData": ["targetHighPrice", "targetLowPrice", "targetMeanPrice",
-                      "recommendationMean", "recommendationKey",
-                      "numberOfAnalystOpinions", "totalCash", "totalDebt",
-                      "currentRatio", "quickRatio", "totalRevenue",
-                      "debtToEquity", "returnOnAssets", "returnOnEquity",
-                      "freeCashflow", "operatingCashflow", "revenueGrowth",
-                      "earningsGrowth", "grossMargins", "operatingMargins",
-                      "profitMargins", "ebitdaMargins"],
-    "defaultKeyStatistics": ["enterpriseValue", "forwardPE", "pegRatio",
-                             "priceToBook", "trailingEps", "forwardEps",
-                             "bookValue", "sharesOutstanding", "beta",
-                             "earningsQuarterlyGrowth", "enterpriseToRevenue",
-                             "enterpriseToEbitda", "52WeekChange",
-                             "shortPercentOfFloat"],
-    "assetProfile": ["sector", "industry", "fullTimeEmployees"],
-}
-
-
-def line(ch="-", n=72):
-    print(ch * n)
+# SEC requires a descriptive User-Agent with contact info or it returns 403.
+SEC_UA = "Stocksapp-Screener/1.0 (eladn2006@gmail.com)"
+BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+              "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 "
+              "Safari/537.36")
 
 
 def head(title):
     print()
-    line("=")
+    print("=" * 72)
     print(title)
-    line("=")
+    print("=" * 72)
 
 
-def new_session():
+def sec_session():
     s = requests.Session()
-    s.headers.update({"User-Agent": UA, "Accept": "application/json,*/*"})
+    s.headers.update({"User-Agent": SEC_UA, "Accept-Encoding": "gzip, deflate"})
     return s
 
 
-def get_crumb(s):
-    """Yahoo gates quoteSummary behind a cookie+crumb pair. Try the known
-    bootstrap routes in order and return the first crumb we manage to get."""
-    routes = [
-        ("fc.yahoo.com", "https://fc.yahoo.com/"),
-        ("finance home", "https://finance.yahoo.com/"),
-        ("quote page", "https://finance.yahoo.com/quote/AAPL"),
-    ]
-    for name, url in routes:
+# --------------------------------------------------------------------------
+# 1. Confirm the Yahoo block is IP-based and not a transient rate limit
+# --------------------------------------------------------------------------
+def probe_yahoo_retry():
+    s = requests.Session()
+    s.headers.update({"User-Agent": BROWSER_UA})
+    codes = []
+    for attempt in range(3):
         try:
-            s.get(url, timeout=15)
+            r = s.get("https://query1.finance.yahoo.com/v8/finance/chart/MU"
+                      "?interval=1d&range=1mo", timeout=15)
+            codes.append(r.status_code)
+            print(f"  attempt {attempt + 1}: HTTP {r.status_code}")
+            if r.status_code == 200:
+                return True
         except Exception as e:
-            print(f"  bootstrap via {name}: EXC {type(e).__name__}")
-            continue
-        try:
-            r = s.get("https://query2.finance.yahoo.com/v1/test/getcrumb",
-                      timeout=15)
-            crumb = (r.text or "").strip()
-            ok = r.status_code == 200 and crumb and "<" not in crumb and len(crumb) < 40
-            print(f"  bootstrap via {name}: HTTP {r.status_code} crumb={crumb!r} "
-                  f"cookies={len(s.cookies)} -> {'OK' if ok else 'no'}")
-            if ok:
-                return crumb
-        except Exception as e:
-            print(f"  bootstrap via {name}: crumb EXC {type(e).__name__}")
-    return None
+            codes.append(0)
+            print(f"  attempt {attempt + 1}: EXC {type(e).__name__}")
+        time.sleep(3)
+    print(f"  -> codes={codes}; consistent 429 means the runner IP is blocked, "
+          f"not throttled")
+    return False
 
 
-def try_quote_summary(s, sym, crumb=None, host="query2"):
-    url = (f"https://{host}.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
-           f"?modules={','.join(MODULES)}")
-    if crumb:
-        url += f"&crumb={crumb}"
+# --------------------------------------------------------------------------
+# 2. SEC ticker -> CIK map
+# --------------------------------------------------------------------------
+def probe_sec_tickers(s):
     try:
-        r = s.get(url, timeout=20)
+        r = s.get("https://www.sec.gov/files/company_tickers.json", timeout=30)
     except Exception as e:
-        return None, f"EXC {type(e).__name__}: {e}"
+        print(f"  EXC {type(e).__name__}")
+        return None
+    print(f"  HTTP {r.status_code}, {len(r.content)} bytes")
     if r.status_code != 200:
-        return None, f"HTTP {r.status_code} body={r.text[:120]!r}"
+        print(f"  body={r.text[:200]!r}")
+        return None
     try:
         d = r.json()
     except Exception:
-        return None, f"non-JSON body={r.text[:120]!r}"
-    res = (d.get("quoteSummary") or {}).get("result")
-    if not res:
-        err = (d.get("quoteSummary") or {}).get("error")
-        return None, f"no result, error={err}"
-    return res[0], "OK"
+        print(f"  non-JSON: {r.text[:200]!r}")
+        return None
+    m = {}
+    for row in d.values():
+        m[row["ticker"]] = str(row["cik_str"]).zfill(10)
+    print(f"  parsed {len(m)} tickers; "
+          f"MU={m.get('MU')} AAPL={m.get('AAPL')} NVDA={m.get('NVDA')}")
+    return m
 
 
-def unwrap(v):
-    """Yahoo wraps numbers as {'raw':..,'fmt':..}; unwrap to a plain value."""
-    if isinstance(v, dict):
-        if "raw" in v:
-            return v["raw"]
-        if not v:
-            return None
-        return v
-    return v
-
-
-def report_coverage(data):
-    total = filled = 0
-    for mod, fields in NEEDED.items():
-        block = data.get(mod)
-        if block is None:
-            print(f"  [{mod}] MODULE MISSING ({len(fields)} fields lost)")
-            total += len(fields)
-            continue
-        got, miss = [], []
-        for f in fields:
-            v = unwrap(block.get(f))
-            total += 1
-            if v is None or v == {}:
-                miss.append(f)
-            else:
-                filled += 1
-                got.append(f)
-        print(f"  [{mod}] {len(got)}/{len(fields)} present")
-        if miss:
-            print(f"      missing: {', '.join(miss)}")
-    print(f"  TOTAL FIELD COVERAGE: {filled}/{total}")
-    return filled, total
-
-
-def probe_chart(s, sym):
-    url = (f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
-           f"?interval=1d&range=1y")
-    try:
-        r = s.get(url, timeout=20)
-    except Exception as e:
-        print(f"  {sym}: EXC {type(e).__name__}")
-        return False
-    if r.status_code != 200:
-        print(f"  {sym}: HTTP {r.status_code}")
-        return False
-    try:
-        res = r.json()["chart"]["result"][0]
-        closes = res["indicators"]["quote"][0]["close"]
-        n = sum(1 for c in closes if c is not None)
-        meta = res.get("meta", {})
-        print(f"  {sym}: OK {n} daily closes, currency={meta.get('currency')}, "
-              f"last={meta.get('regularMarketPrice')}")
-        return n > 200
-    except Exception as e:
-        print(f"  {sym}: parse fail {type(e).__name__}")
-        return False
-
-
-def probe_universe(s):
-    """Can we build the S&P 500 + Nasdaq 100 ticker list for free?"""
-    results = {}
+# --------------------------------------------------------------------------
+# 3. SEC frames API - one concept, all filers, one request
+# --------------------------------------------------------------------------
+def probe_sec_frames(s):
+    """This is the make-or-break call for the screener: if one request returns
+    a financial concept for thousands of companies, a 600-symbol scan is cheap."""
     tests = [
-        ("wikipedia S&P500",
-         "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"),
-        ("wikipedia Nasdaq-100",
-         "https://en.wikipedia.org/wiki/Nasdaq-100"),
+        ("Revenues", "us-gaap", "Revenues", "USD", "CY2025Q1"),
+        ("RevenueFromContractWithCustomer", "us-gaap",
+         "RevenueFromContractWithCustomerExcludingAssessedTax", "USD", "CY2025Q1"),
+        ("NetIncomeLoss", "us-gaap", "NetIncomeLoss", "USD", "CY2025Q1"),
+        ("Assets", "us-gaap", "Assets", "USD", "CY2025Q1I"),
+        ("StockholdersEquity", "us-gaap", "StockholdersEquity", "USD", "CY2025Q1I"),
+        ("EPS diluted", "us-gaap", "EarningsPerShareDiluted", "USD-per-shares",
+         "CY2025Q1"),
     ]
-    for name, url in tests:
+    ok_any = False
+    for label, taxo, tag, unit, period in tests:
+        url = (f"https://data.sec.gov/api/xbrl/frames/{taxo}/{tag}/{unit}/"
+               f"{period}.json")
+        try:
+            r = s.get(url, timeout=30)
+        except Exception as e:
+            print(f"  {label:38} EXC {type(e).__name__}")
+            continue
+        if r.status_code != 200:
+            print(f"  {label:38} HTTP {r.status_code}")
+            continue
+        try:
+            data = r.json().get("data", [])
+        except Exception:
+            print(f"  {label:38} non-JSON")
+            continue
+        ok_any = True
+        sample = next((x for x in data if x.get("cik") == 723125), None)  # MU
+        print(f"  {label:38} HTTP 200  filers={len(data):5}  "
+              f"MU={sample.get('val') if sample else 'n/a'}")
+        time.sleep(0.15)
+    return ok_any
+
+
+# --------------------------------------------------------------------------
+# 4. SEC companyfacts - full history for one company
+# --------------------------------------------------------------------------
+def probe_sec_companyfacts(s, cik):
+    url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+    try:
+        r = s.get(url, timeout=45)
+    except Exception as e:
+        print(f"  EXC {type(e).__name__}")
+        return False
+    print(f"  HTTP {r.status_code}, {len(r.content) / 1024:.0f} KB")
+    if r.status_code != 200:
+        return False
+    d = r.json()
+    facts = d.get("facts", {}).get("us-gaap", {})
+    print(f"  entity={d.get('entityName')!r}, us-gaap concepts={len(facts)}")
+    wanted = ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
+              "NetIncomeLoss", "Assets", "Liabilities", "StockholdersEquity",
+              "EarningsPerShareDiluted", "CashAndCashEquivalentsAtCarryingValue",
+              "NetCashProvidedByUsedInOperatingActivities",
+              "PaymentsToAcquirePropertyPlantAndEquipment",
+              "LongTermDebtNoncurrent", "GrossProfit", "OperatingIncomeLoss",
+              "CommonStockSharesOutstanding"]
+    have = [w for w in wanted if w in facts]
+    print(f"  key concepts present: {len(have)}/{len(wanted)}")
+    missing = [w for w in wanted if w not in facts]
+    if missing:
+        print(f"  missing: {', '.join(missing)}")
+    return len(have) >= 8
+
+
+# --------------------------------------------------------------------------
+# 5. Stooq - daily OHLCV for technicals
+# --------------------------------------------------------------------------
+def probe_stooq():
+    s = requests.Session()
+    s.headers.update({"User-Agent": BROWSER_UA})
+    ok = 0
+    for sym in ["mu.us", "aapl.us", "nvda.us"]:
+        url = f"https://stooq.com/q/d/l/?s={sym}&i=d"
         try:
             r = s.get(url, timeout=25)
-            ok = r.status_code == 200 and "wikitable" in r.text
-            print(f"  {name}: HTTP {r.status_code} len={len(r.text)} "
-                  f"table={'yes' if ok else 'NO'}")
-            results[name] = ok
         except Exception as e:
-            print(f"  {name}: EXC {type(e).__name__}")
-            results[name] = False
-    return results
+            print(f"  {sym}: EXC {type(e).__name__}")
+            continue
+        body = r.text
+        if r.status_code != 200 or body.strip().lower().startswith("exceeded"):
+            print(f"  {sym}: HTTP {r.status_code} body={body[:80]!r}")
+            continue
+        rows = list(csv.DictReader(io.StringIO(body)))
+        if not rows:
+            print(f"  {sym}: empty CSV body={body[:80]!r}")
+            continue
+        last = rows[-1]
+        print(f"  {sym}: OK {len(rows)} daily rows, "
+              f"last {last.get('Date')} close={last.get('Close')}")
+        ok += 1
+        time.sleep(0.3)
+    return ok >= 2
+
+
+# --------------------------------------------------------------------------
+# 6. stockanalysis.com - unofficial all-in-one fallback
+# --------------------------------------------------------------------------
+def probe_stockanalysis():
+    s = requests.Session()
+    s.headers.update({"User-Agent": BROWSER_UA, "Accept": "application/json"})
+    urls = [
+        ("screener api",
+         "https://stockanalysis.com/api/screener/s/f?m=marketCap&s=desc"
+         "&c=no,s,n,marketCap,peRatio,revenueGrowth&cn=20"),
+        ("quote MU", "https://stockanalysis.com/api/symbol/s/mu/overview"),
+    ]
+    ok = False
+    for label, url in urls:
+        try:
+            r = s.get(url, timeout=25)
+            body = r.text[:160]
+            print(f"  {label}: HTTP {r.status_code} len={len(r.text)} "
+                  f"body={body!r}")
+            if r.status_code == 200 and r.text.strip().startswith("{"):
+                ok = True
+        except Exception as e:
+            print(f"  {label}: EXC {type(e).__name__}")
+    return ok
 
 
 def main():
-    head("1. CHART ENDPOINT  (technicals: MA / ATR / RSI / 52w)")
-    s = new_session()
-    chart_ok = all(probe_chart(s, sym) for sym in SYMBOLS)
+    head("1. YAHOO - confirm the block is by IP, not throttling")
+    yahoo_ok = probe_yahoo_retry()
 
-    head("2. QUOTESUMMARY WITHOUT CRUMB")
-    data, msg = try_quote_summary(s, "MU")
-    print(f"  MU: {msg}")
-    nocrumb_ok = data is not None
-    if nocrumb_ok:
-        report_coverage(data)
+    s = sec_session()
 
-    head("3. QUOTESUMMARY WITH COOKIE + CRUMB")
-    s2 = new_session()
-    crumb = get_crumb(s2)
-    crumb_ok = False
-    best = None
-    if crumb:
-        for host in ("query2", "query1"):
-            data2, msg2 = try_quote_summary(s2, "MU", crumb=crumb, host=host)
-            print(f"  MU via {host}: {msg2}")
-            if data2:
-                crumb_ok = True
-                best = data2
-                break
+    head("2. SEC EDGAR - ticker to CIK map")
+    tickers = probe_sec_tickers(s)
+
+    head("3. SEC EDGAR frames - one concept covers every filer at once")
+    frames_ok = probe_sec_frames(s)
+
+    head("4. SEC EDGAR companyfacts - full history for one company (MU)")
+    facts_ok = False
+    if tickers and tickers.get("MU"):
+        facts_ok = probe_sec_companyfacts(s, tickers["MU"])
     else:
-        print("  could not obtain a crumb")
-    if best:
-        report_coverage(best)
+        print("  skipped - no CIK for MU")
 
-    head("4. SAMPLE VALUES (sanity-check the numbers are real)")
-    src = best or data
-    if src:
-        fd = src.get("financialData") or {}
-        sd = src.get("summaryDetail") or {}
-        ks = src.get("defaultKeyStatistics") or {}
-        ap = src.get("assetProfile") or {}
-        for label, v in [
-            ("sector", ap.get("sector")),
-            ("marketCap", unwrap(sd.get("marketCap"))),
-            ("trailingPE", unwrap(sd.get("trailingPE"))),
-            ("targetMeanPrice", unwrap(fd.get("targetMeanPrice"))),
-            ("recommendationKey", fd.get("recommendationKey")),
-            ("profitMargins", unwrap(fd.get("profitMargins"))),
-            ("revenueGrowth", unwrap(fd.get("revenueGrowth"))),
-            ("returnOnEquity", unwrap(fd.get("returnOnEquity"))),
-            ("debtToEquity", unwrap(fd.get("debtToEquity"))),
-            ("freeCashflow", unwrap(fd.get("freeCashflow"))),
-            ("pegRatio", unwrap(ks.get("pegRatio"))),
-            ("priceToBook", unwrap(ks.get("priceToBook"))),
-            ("enterpriseToEbitda", unwrap(ks.get("enterpriseToEbitda"))),
-        ]:
-            print(f"  {label:22} = {v}")
-        rt = src.get("recommendationTrend") or {}
-        print(f"  recommendationTrend rows = {len(rt.get('trend') or [])}")
-        ce = src.get("calendarEvents") or {}
-        print(f"  calendarEvents.earnings  = "
-              f"{json.dumps(ce.get('earnings'), default=str)[:160]}")
-    else:
-        print("  no quoteSummary data from any strategy")
+    head("5. STOOQ - daily OHLCV for technicals")
+    stooq_ok = probe_stooq()
 
-    head("5. THROUGHPUT  (how long would 600 symbols take?)")
-    if best or data:
-        sess = s2 if crumb_ok else s
-        t0 = time.time()
-        n = 0
-        for sym in ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]:
-            d, _ = try_quote_summary(sess, sym, crumb=crumb if crumb_ok else None)
-            if d:
-                n += 1
-            time.sleep(0.3)
-        dt = time.time() - t0
-        print(f"  {n}/5 ok in {dt:.1f}s -> ~{dt / 5 * 600 / 60:.1f} min for 600 "
-              f"(sequential, 0.3s pause)")
-    else:
-        print("  skipped")
-
-    head("6. UNIVERSE SOURCE  (S&P 500 + Nasdaq 100 constituents)")
-    uni = probe_universe(new_session())
+    head("6. STOCKANALYSIS.COM - unofficial fallback")
+    sa_ok = probe_stockanalysis()
 
     head("VERDICT")
-    print(f"  chart (technicals)      : {'OK' if chart_ok else 'FAIL'}")
-    print(f"  quoteSummary no-crumb   : {'OK' if nocrumb_ok else 'FAIL'}")
-    print(f"  quoteSummary with crumb : {'OK' if crumb_ok else 'FAIL'}")
-    print(f"  universe from wikipedia : "
-          f"{'OK' if all(uni.values()) else 'PARTIAL/FAIL'}")
-    fundamentals = nocrumb_ok or crumb_ok
+    rows = [
+        ("yahoo from runner", yahoo_ok),
+        ("sec ticker->cik", bool(tickers)),
+        ("sec frames (bulk)", frames_ok),
+        ("sec companyfacts", facts_ok),
+        ("stooq ohlcv", stooq_ok),
+        ("stockanalysis", sa_ok),
+    ]
+    for label, ok in rows:
+        print(f"  {label:22}: {'OK' if ok else 'FAIL'}")
+
+    fundamentals = frames_ok or facts_ok or sa_ok
+    technicals = stooq_ok or sa_ok
     print()
-    if chart_ok and fundamentals:
-        print("  => GO. Free stack is sufficient for the full plan.")
+    if fundamentals and technicals:
+        print("  => GO. Server-side scan is viable without Yahoo.")
         return 0
-    if chart_ok:
-        print("  => PARTIAL. Technicals fine, fundamentals need another source.")
-        return 2
-    print("  => BLOCKED. Need a different data provider.")
-    return 3
+    print("  => Still short. fundamentals=%s technicals=%s"
+          % (fundamentals, technicals))
+    return 2
 
 
 if __name__ == "__main__":
