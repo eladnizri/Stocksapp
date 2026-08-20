@@ -9,6 +9,7 @@ the file changes, so caching still works; it just cannot go stale.
 Idempotent: run it twice and the second run reports nothing to do.
 """
 import hashlib
+import json
 import os
 import re
 import sys
@@ -49,6 +50,26 @@ def main():
             print(f"  {asset}: no reference in index.html", file=sys.stderr)
             return 1
         print(f"  {asset} -> ?v={digest}  ({n} reference{'s' if n > 1 else ''})")
+
+    # Publish the hashes so a running copy can notice it is out of date.
+    # Stamping the assets alone was not enough: index.html carries those
+    # stamped URLs and is itself cacheable, so a stale page keeps asking for
+    # the old files and never learns a new build exists.
+    digests = {}
+    for asset in ASSETS:
+        path = os.path.join(ROOT, asset)
+        if os.path.exists(path):
+            digests[asset.split(".")[0]] = short_hash(path)
+    version_path = os.path.join(ROOT, "version.json")
+    payload = json.dumps(digests, indent=2, sort_keys=True) + "\n"
+    old = ""
+    if os.path.exists(version_path):
+        with open(version_path, encoding="utf-8") as fh:
+            old = fh.read()
+    if payload != old:
+        with open(version_path, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        print(f"version.json -> {digests}")
 
     if html == original:
         print("already current")

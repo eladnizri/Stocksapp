@@ -1455,7 +1455,36 @@ function greet() {
        : h < 17 ? 'צהריים טובים' : h < 21 ? 'ערב טוב' : 'לילה טוב';
 }
 
+/* Notice a new build and load it.
+
+   Stamping app.js and style.css only helps once index.html is fresh, and
+   index.html is cacheable too - a stale page keeps requesting the old stamped
+   URLs forever. So compare the hash this page is running against what the
+   server publishes, and if they differ, re-request the page under a URL the
+   cache has never seen. Self-healing from here on: every future deploy lands
+   without anyone clearing anything. */
+function checkForUpdate() {
+  var el = document.querySelector('script[src*="app.js"]');
+  var m = el && /[?&]v=([0-9a-f]+)/.exec(el.getAttribute('src') || '');
+  var running = m ? m[1] : null;
+  if (!running) return;
+
+  fetch('version.json?t=' + Date.now(), { cache: 'no-store' })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (v) {
+      if (!v || !v.app || v.app === running) return;
+      // Keyed on the target build, so a server that lags cannot cause a loop.
+      var tried = null;
+      try { tried = sessionStorage.getItem('sa_updated_to'); } catch (e) {}
+      if (tried === v.app) return;
+      try { sessionStorage.setItem('sa_updated_to', v.app); } catch (e) {}
+      location.replace(location.pathname + '?build=' + v.app);
+    })
+    .catch(function () {});
+}
+
 function boot() {
+  checkForUpdate();
   $('#greet').textContent = greet();
   enableSwipe();
   renderFilters();
