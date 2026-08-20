@@ -156,40 +156,6 @@ function yahooQuote(sym) {
   });
 }
 
-/* Analyst targets and recommendation counts. Best effort - Yahoo gates this
-   behind a crumb for some clients, so the page must render fine without it. */
-function yahooTargets(sym) {
-  var url = 'https://query1.finance.yahoo.com/v10/finance/quoteSummary/' +
-    encodeURIComponent(sym) +
-    '?modules=financialData,recommendationTrend,calendarEvents';
-  return fetchRaw(url, 9000).then(function (txt) {
-    var d = JSON.parse(txt);
-    var r = d && d.quoteSummary && d.quoteSummary.result &&
-      d.quoteSummary.result[0];
-    if (!r) throw new Error('אין נתוני אנליסטים');
-    var fd = r.financialData || {};
-    var raw = function (x) { return x && x.raw != null ? x.raw : null; };
-    var trend = (r.recommendationTrend && r.recommendationTrend.trend) || [];
-    var cur = trend[0] || {};
-    var earn = null;
-    try {
-      var ed = r.calendarEvents.earnings.earningsDate;
-      if (ed && ed.length && ed[0].raw) earn = ed[0].raw;
-    } catch (e) {}
-    return {
-      low: raw(fd.targetLowPrice),
-      mean: raw(fd.targetMeanPrice),
-      high: raw(fd.targetHighPrice),
-      n: raw(fd.numberOfAnalystOpinions),
-      key: fd.recommendationKey || null,
-      buy: (cur.strongBuy || 0) + (cur.buy || 0),
-      hold: cur.hold || 0,
-      sell: (cur.sell || 0) + (cur.strongSell || 0),
-      earnings: earn
-    };
-  });
-}
-
 /* --------------------------------------------------------------- snapshot */
 var SNAP = null;
 var SNAP_BY_SYM = {};
@@ -343,19 +309,16 @@ function analyze(sym) {
     if (CUR === sym) renderAnalysis(sym, row, q, undefined);
   }).catch(function () {});
 
-  yahooTargets(sym).then(function (t) {
-    if (CUR === sym) renderAnalysis(sym, row, undefined, t);
-  }).catch(function () {});
 }
 
 var LIVE = { q: null, t: null };
 
 function renderAnalysis(sym, row, quote, targets) {
   if (quote !== undefined) LIVE.q = quote;
-  if (targets !== undefined) LIVE.t = targets;
-  if (quote === null && targets === null) LIVE = { q: null, t: null };
+  if (quote === null) LIVE = { q: null, t: null };
 
-  var q = LIVE.q, tg = LIVE.t;
+  var q = LIVE.q;
+  var tg = (row && row.an) || null;
   var f = (row && row.f) || {};
   var t = (row && row.t) || {};
   var sc = (row && row.sc) || {};
@@ -392,6 +355,7 @@ function renderAnalysis(sym, row, quote, targets) {
         '<div class="d"><span class="lb">תשואה 12ח</span>' +
           '<span class="vl ' + cls(t.chg12m) + '">' + pct(t.chg12m, 1) + '</span></div>' +
       '</div>' +
+      earningsLine(row && row.er) +
     '</div></div>';
 
   if (!row) {
@@ -432,6 +396,38 @@ function renderAnalysis(sym, row, quote, targets) {
   }
 
   $('#sheetBody').innerHTML = html;
+}
+
+/* Next scheduled report. Nasdaq gives a date and, usually, the consensus EPS
+   for that quarter. Shown relative as well as absolute, because "in 3 days"
+   is what actually matters when deciding whether to open a position. */
+function earningsLine(er) {
+  /* Nasdaq publishes report dates only a few weeks out, so between earnings
+     seasons most companies genuinely have none. Say so rather than omitting
+     the row, which reads as a missing feature instead of a missing date. */
+  var d = er && er.d ? new Date(er.d + 'T12:00:00') : null;
+  if (!d || isNaN(d)) {
+    return '<div class="earn"><span class="earn-k">דוח הבא</span>' +
+      '<span class="earn-v" style="color:var(--muted);font-weight:600">' +
+      'טרם פורסם</span></div>';
+  }
+  var days = Math.round((d - new Date()) / 86400000);
+  var when = days < 0 ? '' : days === 0 ? 'היום'
+    : days === 1 ? 'מחר' : 'בעוד ' + days + ' ימים';
+  var slot = er.t === 'pre' ? 'לפני הפתיחה'
+    : er.t === 'post' ? 'אחרי הנעילה' : '';
+  var soon = days >= 0 && days <= 7;
+  return '<div class="earn' + (soon ? ' soon' : '') + '">' +
+    '<span class="earn-k">דוח הבא</span>' +
+    '<span class="earn-v">' +
+      d.toLocaleDateString('he-IL', { day: 'numeric', month: 'short' }) +
+      (when ? ' · ' + when : '') + '</span>' +
+    (slot || er.eps
+      ? '<span class="earn-m">' + slot +
+        (slot && er.eps ? ' · ' : '') +
+        (er.eps ? 'צפי ' + esc(er.eps) : '') + '</span>'
+      : '') +
+    '</div>';
 }
 
 function renderScoreCard(sc) {
@@ -707,36 +703,29 @@ function renderForecast(tg, price) {
   if (!tg || !tg.mean) {
     return '<div class="card">' +
       '<div class="card-h"><span>תחזית אנליסטים</span></div>' +
-      '<div class="msg">נתוני אנליסטים לא זמינים כרגע.</div></div>';
+      '<div class="msg">אין כיסוי אנליסטים למניה הזו במאגר.</div></div>';
   }
   var up = price ? ((tg.mean - price) / price) * 100 : null;
   var total = (tg.buy || 0) + (tg.hold || 0) + (tg.sell || 0);
   var bar = function (label, n, color) {
-    var w = total ? (n / total) * 100 : 0;
+    var w = total ? ((n || 0) / total) * 100 : 0;
     return '<div class="bar-row"><span class="lb">' + label + '</span>' +
       '<span class="bar-track"><i class="bar-fill" style="width:' + w +
         '%;background:' + color + '"></i></span>' +
-      '<span class="nv">' + n + '</span></div>';
+      '<span class="vl">' + (n || 0) + '</span></div>';
   };
   var earn = '';
-  if (tg.earnings) {
-    var d = new Date(tg.earnings * 1000);
-    earn = '<div class="mrow" style="grid-template-columns:1fr auto">' +
-      '<span class="lb">דוח הבא</span><span class="vl">' +
-      d.toLocaleDateString('he-IL', { day: 'numeric', month: 'short', year: 'numeric' }) +
-      '</span></div>';
-  }
   return '<div class="card">' +
     '<div class="card-h"><span>תחזית אנליסטים</span>' +
-      '<span class="sub">' + (tg.n || 0) + ' אנליסטים</span></div>' +
+      '<span class="sub">' + total + ' אנליסטים</span></div>' +
     '<div class="mtable">' +
       '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">יעד נמוך</span>' +
-        '<span class="vl">' + money(tg.low) + '</span></div>' +
+        '<span class="vl">' + money(tg.lo) + '</span></div>' +
       '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">יעד ממוצע</span>' +
         '<span class="vl" style="color:var(--primary-500)">' + money(tg.mean) +
         (up == null ? '' : ' (' + pct(up, 0) + ')') + '</span></div>' +
       '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">יעד גבוה</span>' +
-        '<span class="vl">' + money(tg.high) + '</span></div>' + earn +
+        '<span class="vl">' + money(tg.hi) + '</span></div>' + earn +
     '</div>' +
     (total ? '<div class="bars" style="margin-top:11px">' +
       bar('קנייה', tg.buy, 'var(--gain)') +
@@ -904,13 +893,14 @@ function renderFilters() {
         (f[4] ? '<button class="info" onclick="toggleHelp(\'' + f[0] +
           '\')" aria-label="הסבר על ' + f[1] + '">i</button>' : '') +
       '</span>' +
-      '<input id="f-' + f[0] + '-min" inputmode="decimal" placeholder="מ־" value="' +
-        (v.min != null ? v.min : '') + '">' +
-      '<input id="f-' + f[0] + '-max" inputmode="decimal" placeholder="עד" value="' +
-        (v.max != null ? v.max : '') + '">' +
+      '<input id="f-' + f[0] + '-min" inputmode="decimal" placeholder="מ־ ' +
+        f[2] + '" value="' + (v.min != null ? v.min : '') + '">' +
+      '<input id="f-' + f[0] + '-max" inputmode="decimal" placeholder="עד ' +
+        f[3] + '" value="' + (v.max != null ? v.max : '') + '">' +
       '</div>' +
-      (f[4] ? '<div class="fhelp" id="h-' + f[0] + '" hidden>' + f[4] +
-        '</div>' : '');
+      (f[4] ? '<div class="fhelp" id="h-' + f[0] + '" hidden>' +
+        '<b class="rng">טווח בנתונים: ' + f[2] + ' עד ' + f[3] + '</b>' +
+        f[4] + '</div>' : '');
   }).join('');
 
   /* Build the index chips from what the snapshot actually contains, so an
@@ -1136,13 +1126,17 @@ function runScreen() {
       return '<button class="hit" onclick="analyze(\'' + r.s + '\')">' +
         '<span class="hit-score" style="background:' + scoreColor(sc) +
           '22;color:' + scoreColor(sc) + '">' + (sc == null ? '—' : sc) + '</span>' +
-        '<span><span class="sym">' + r.s + '</span>' +
+        '<span class="hit-id">' +
+          '<span class="sym">' + r.s + '</span>' +
           '<span class="nm">' + esc(r.n || '') + '</span>' +
-          '<span class="nm">' + big(r.mcap) + ' · מכפיל ' +
-          (r.pe ? num(r.pe, 1) : '—') + '</span></span>' +
-        '<span><span class="pr">' + money(t.price) + '</span>' +
-          '<span class="ch ' + cls(t.chg12m) + '">' + pct(t.chg12m, 0) + ' שנה</span></span>' +
-        '</button>';
+          '<span class="mini">' + big(r.mcap) + ' · מכפיל ' +
+            (r.pe ? num(r.pe, 1) : '—') + '</span>' +
+        '</span>' +
+        '<span class="hit-px">' +
+          '<span class="pr">' + money(t.price) + '</span>' +
+          '<span class="d ' + cls(t.chg12m) + '">' + pct(t.chg12m, 0) +
+            ' שנה</span>' +
+        '</span></button>';
     }).join('');
 }
 
@@ -1261,7 +1255,18 @@ function renderBreadth() {
     (tone ? '<div class="bd-sum"><b>' + tone[0] + '</b> · ' + tone[1] + '</div>' : '');
 }
 
+/* Kept as the single place that reports snapshot trouble. The card it used to
+   write into moved into the settings sheet, so it only renders when that sheet
+   is open; a load error is also surfaced on the market page below. */
 function renderDataStatus(err, isCache) {
+  if (err) {
+    var bd = $('#breadth');
+    if (bd) {
+      bd.innerHTML = '<div class="msg err">לא הצלחנו לטעון את בסיס הנתונים: ' +
+        esc(err) + '<br><button class="chip" style="margin-top:8px" ' +
+        'onclick="refreshSnapshot()">נסה שוב</button></div>';
+    }
+  }
   var box = $('#dataStatus');
   if (!box) return;
   if (err) {
@@ -1284,16 +1289,64 @@ function renderDataStatus(err, isCache) {
 }
 
 function openSettings() {
-  goTab('watch');
-  var el = $('#dataStatus');
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  CUR = null;
+  var gen = SNAP && SNAP.generated
+    ? SNAP.generated.replace('T', ' ').slice(0, 16) : '—';
+  var scored = SNAP ? SNAP.rows.filter(function (r) {
+    return r.sc && r.sc.total != null;
+  }).length : 0;
+  var sectors = SNAP ? SNAP.rows.filter(function (r) { return r.sec; }).length : 0;
+
+  // The asset version is worth surfacing: a stale copy is the failure mode
+  // this app has hit most, and it is invisible otherwise.
+  var ver = '—';
+  try {
+    var src = document.querySelector('script[src*="app.js"]');
+    var m = src && /[?&]v=([0-9a-f]+)/.exec(src.getAttribute('src'));
+    if (m) ver = m[1];
+  } catch (e) {}
+
+  var row = function (k, v) {
+    return '<div class="mrow" style="grid-template-columns:1fr auto">' +
+      '<span class="lb">' + k + '</span><span class="vl">' + v + '</span></div>';
+  };
+
+  $('#sheetBody').innerHTML =
+    '<div class="card">' +
+      '<div class="card-h"><span>הגדרות</span>' +
+        '<button class="icon-btn" onclick="closeSheet()" aria-label="סגור">' +
+        '<svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>' +
+        '</button></div>' +
+      '<div class="mtable">' +
+        row('מניות במאגר', SNAP ? SNAP.rows.length : 0) +
+        row('עם ציון מלא', scored) +
+        row('עם סקטור', sectors) +
+        row('המאגר עודכן', esc(gen)) +
+        row('גרסת האפליקציה', esc(ver)) +
+      '</div>' +
+      '<div class="score-note" style="margin-top:10px">המאגר נבנה כל לילה ' +
+        'מדוחות שהוגשו ל־SEC. המחירים החיים נמשכים מהמכשיר.</div>' +
+    '</div>' +
+    '<div class="card">' +
+      '<div class="card-h"><span>פעולות</span></div>' +
+      '<button class="btn" onclick="refreshSnapshot()">רענן את המאגר</button>' +
+      '<div class="score-note" style="margin:8px 0 14px">מוריד מחדש את ' +
+        'נתוני הסריקה האחרונים.</div>' +
+      '<button class="btn ghost" onclick="clearCache()">נקה מטמון וטען מחדש</button>' +
+      '<div class="score-note" style="margin-top:8px">אם האפליקציה נראית ' +
+        'ישנה אחרי עדכון — זה מה שפותר.</div>' +
+    '</div>';
+  openSheet();
+  $('.modal-sheet').scrollTop = 0;
 }
 
 function refreshSnapshot() {
   try { localStorage.removeItem(LS.snap); } catch (e) {}
   var box = $('#dataStatus');
   if (box) box.innerHTML = '<div class="msg">טוען…</div>';
-  loadSnapshot();
+  loadSnapshot().then(function () {
+    if (!$('#sheet').classList.contains('hidden')) openSettings();
+  }).catch(function () {});
 }
 
 /* Drops the cached snapshot only. Alerts, saved filters and anything the
@@ -1360,6 +1413,42 @@ function renderSectors() {
     '</b> נחלש.</div>';
 }
 
+/* Swipe between pages. The tab bar in RTL puts שוק on the right and מעקב on
+   the left, so a flick toward a side selects the tab on that side - the
+   gesture points at what you want, which holds in either direction. */
+var TAB_ORDER = ['market', 'watch'];
+
+function currentTab() {
+  var on = document.querySelector('.tab.on');
+  return on ? on.dataset.page : TAB_ORDER[0];
+}
+
+function enableSwipe() {
+  var el = $('#pages');
+  if (!el) return;
+  var x0 = null, y0 = 0, t0 = 0;
+
+  el.addEventListener('touchstart', function (e) {
+    if (e.touches.length !== 1) { x0 = null; return; }
+    x0 = e.touches[0].clientX;
+    y0 = e.touches[0].clientY;
+    t0 = Date.now();
+  }, { passive: true });
+
+  el.addEventListener('touchend', function (e) {
+    if (x0 == null) return;
+    var t = e.changedTouches[0];
+    var dx = t.clientX - x0, dy = t.clientY - y0;
+    x0 = null;
+    if (Date.now() - t0 > 600) return;             // a drag, not a flick
+    if (Math.abs(dx) < 60) return;                 // too short to mean it
+    if (Math.abs(dy) > Math.abs(dx) * 0.7) return; // that was a scroll
+    var i = TAB_ORDER.indexOf(currentTab());
+    var next = dx < 0 ? i + 1 : i - 1;
+    if (next >= 0 && next < TAB_ORDER.length) goTab(TAB_ORDER[next]);
+  }, { passive: true });
+}
+
 function greet() {
   var h = new Date().getHours();
   return h < 5 ? 'לילה טוב' : h < 12 ? 'בוקר טוב'
@@ -1368,6 +1457,7 @@ function greet() {
 
 function boot() {
   $('#greet').textContent = greet();
+  enableSwipe();
   renderFilters();
   loadTickers();
   loadSnapshot().then(function () {

@@ -9,6 +9,7 @@ on:
     paths:
       - 'scripts/probe_sources.py'
       - 'scripts/probe_sector.py'
+      - 'scripts/probe_analyst.py'
       - '.github/workflows/probe.yml'
 
 jobs:
@@ -20,5 +21,5 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install --quiet requests
-      - name: Probe sector sources
-        run: python scripts/probe_sector.py
+      - name: Probe analyst and earnings sources
+        run: python scripts/probe_analyst.py

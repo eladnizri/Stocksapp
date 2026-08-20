@@ -279,6 +279,21 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
 }
 
+/* The next report date, in the quote header. */
+.earn {
+  margin-top: 12px; padding: 10px 12px;
+  border-radius: var(--r-sm); background: var(--surface-2);
+  display: grid; grid-template-columns: auto 1fr; gap: 4px 8px;
+  align-items: baseline;
+}
+.earn.soon { background: rgba(207, 138, 31, .12); }
+.earn-k { font-size: .74rem; font-weight: 600; color: var(--ink-2); }
+.earn-v { font-size: .84rem; font-weight: 800; }
+.earn.soon .earn-v { color: #a06a12; }
+.earn-m {
+  grid-column: 1 / -1; font-size: .72rem; color: var(--muted);
+}
+
 /* ----------------------------------------------------------------- score */
 .score-top { display: flex; align-items: center; gap: 15px; }
 .score-ring {
@@ -408,6 +423,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   border: 1px solid var(--border); flex: none;
 }
 .info:active { background: var(--primary); color: #fff; }
+.fhelp .rng {
+  display: block; margin-bottom: 5px;
+  font-size: .72rem; font-weight: 700; color: var(--primary-500);
+}
 .fhelp {
   font-size: .76rem; line-height: 1.6; color: var(--ink-2);
   background: var(--surface-2); border-inline-start: 3px solid var(--primary);
@@ -430,7 +449,9 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 
 /* -------------------------------------------------------------- screener */
 .hit {
-  display: grid; grid-template-columns: 40px 1fr auto;
+  /* minmax(0,1fr) so the middle column may shrink below its content width -
+     a plain 1fr floors at min-content and pushes the price off-screen. */
+  display: grid; grid-template-columns: 40px minmax(0, 1fr) auto;
   align-items: center; gap: 11px;
   padding: 12px 13px; border-radius: var(--r-md);
   background: var(--surface-2); margin-bottom: 8px;
@@ -444,14 +465,18 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   font-size: .95rem; font-weight: 800; color: #fff;
   font-variant-numeric: tabular-nums;
 }
+.hit-id { min-width: 0; }
+.hit-id > span { display: block; }
 .hit .sym { font-weight: 800; font-size: .92rem; }
-.hit .nm {
-  font-size: .74rem; color: var(--ink-2);
+.hit .nm, .hit .mini {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.hit .nm { font-size: .74rem; color: var(--ink-2); }
 .hit .mini { font-size: .7rem; color: var(--muted); margin-top: 2px; }
+.hit-px { text-align: end; white-space: nowrap; }
+.hit-px > span { display: block; }
 .hit .pr {
-  text-align: end; font-weight: 800; font-size: .9rem;
+  font-weight: 800; font-size: .9rem;
   font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
 }
 .hit .d { font-size: .72rem; font-weight: 700; }
