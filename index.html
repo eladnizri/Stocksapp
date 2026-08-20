@@ -44,6 +44,12 @@
       </div>
 
       <div class="card">
+        <div class="card-h"><span>כוח סקטורים</span>
+          <span class="sub">חציון חודש</span></div>
+        <div id="sectors"><div class="msg">טוען…</div></div>
+      </div>
+
+      <div class="card">
         <div class="card-h"><span>ניתוח מניה</span></div>
         <div class="search-wrap">
           <input class="search" id="q" type="search" autocomplete="off"
@@ -87,11 +93,15 @@
       <div class="card">
         <div class="card-h"><span>סורק מניות</span>
           <span class="sub" id="screenCount"></span></div>
-        <div class="chips" id="idxChips" style="margin-bottom:13px"></div>
+        <div class="chips" id="idxChips" style="margin-bottom:9px"></div>
+        <div class="chips" id="secChips" style="margin-bottom:13px"></div>
+        <div id="savedScreens" style="margin-bottom:13px"></div>
         <div id="filterRows"></div>
         <div class="frow" style="margin-top:4px">
           <button class="btn" onclick="runScreen()">סרוק</button>
           <button class="btn ghost" style="max-width:96px"
+                  onclick="saveScreen()">שמור</button>
+          <button class="btn ghost" style="max-width:80px"
                   onclick="resetFilters()">נקה</button>
         </div>
         <div id="screenResults" style="margin-top:13px"></div>
