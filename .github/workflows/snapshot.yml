@@ -1,0 +1,103 @@
+name: Build screener snapshot
+
+on:
+  # Nightly, after the US close (21:30 ET = 01:30 UTC next day).
+  schedule:
+    - cron: '30 2 * * 2-6'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Only scan the first N symbols (0 = all)'
+        required: false
+        default: '0'
+  # A push to the scanner runs a small smoke test without committing.
+  push:
+    branches: ['claude/**']
+    paths:
+      - 'scripts/build_snapshot.py'
+      - '.github/workflows/snapshot.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: snapshot
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install --quiet requests
+
+      - name: Decide scan size
+        id: cfg
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "limit=30" >> "$GITHUB_OUTPUT"
+            echo "commit=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "limit=${{ github.event.inputs.limit || 0 }}" >> "$GITHUB_OUTPUT"
+            echo "commit=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build snapshot
+        run: python scripts/build_snapshot.py --limit ${{ steps.cfg.outputs.limit }}
+
+      - name: Inspect output
+        run: |
+          python - <<'PY'
+          import json
+          d = json.load(open('data/screener.json'))
+          rows = d['rows']
+          print(f"generated={d['generated']}  rows={len(rows)}")
+
+          def cov(key, sub=None):
+              n = sum(1 for r in rows
+                      if (r.get(sub, {}) if sub else r).get(key) is not None)
+              return f"{n}/{len(rows)}"
+
+          print("\nfield coverage")
+          for k in ('mcap', 'pe', 'ps', 'pb'):
+              print(f"  {k:14} {cov(k)}")
+          for k in ('revTTM', 'epsTTM', 'grossMargin', 'netMargin', 'roe',
+                    'debtToEquity', 'currentRatio', 'revGrowth', 'epsGrowth',
+                    'fcf', 'shares'):
+              print(f"  f.{k:12} {cov(k, 'f')}")
+          for k in ('price', 'ma50', 'ma200', 'rsi', 'from52High', 'chg12m'):
+              print(f"  t.{k:12} {cov(k, 't')}")
+          for k in ('total', 'value', 'growth', 'profit', 'health', 'momentum'):
+              print(f"  sc.{k:11} {cov(k, 'sc')}")
+
+          print("\ntop 5 by score")
+          ranked = sorted((r for r in rows if r.get('sc', {}).get('total')),
+                          key=lambda r: -r['sc']['total'])[:5]
+          for r in ranked:
+              f, t, sc = r.get('f', {}), r.get('t', {}), r['sc']
+              print(f"  {r['s']:6} score={sc['total']:3}  "
+                    f"price={t.get('price')}  pe={r.get('pe')}  "
+                    f"revG={f.get('revGrowth')}  roe={f.get('roe')}")
+
+          print("\nfull sample row")
+          print(json.dumps(rows[0], indent=2)[:1400])
+          PY
+
+      - name: Commit snapshot
+        if: steps.cfg.outputs.commit == 'true'
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add data/screener.json data/universe.json
+          if git diff --staged --quiet; then
+            echo "no changes"
+          else
+            git commit -m "Update screener snapshot [skip ci]"
+            git push
+          fi
