@@ -21,6 +21,7 @@ import re
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html.parser import HTMLParser
 
 import requests
 
@@ -56,32 +57,94 @@ def web_session():
 # ==========================================================================
 # Universe
 # ==========================================================================
-def scrape_wikipedia_symbols(session, url, symbol_col_hint):
-    """Pull tickers out of the first sortable wikitable on the page."""
+class WikiTableParser(HTMLParser):
+    """Collects every wikitable on the page as a list of text rows.
+
+    Regex over the markup was too brittle: the S&P 500 page links tickers to
+    the exchange while the Nasdaq-100 page does not, so a pattern tuned to one
+    silently returned nothing for the other."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.tables = []
+        self._table = None
+        self._row = None
+        self._cell = None
+        self._depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "table":
+            self._depth += 1
+            if self._depth == 1 and "wikitable" in (a.get("class") or ""):
+                self._table = []
+        elif tag == "tr" and self._table is not None:
+            self._row = []
+        elif tag in ("td", "th") and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag):
+        if tag == "table":
+            if self._depth == 1 and self._table is not None:
+                self.tables.append(self._table)
+                self._table = None
+            self._depth = max(0, self._depth - 1)
+        elif tag == "tr" and self._row is not None:
+            if self._row:
+                self._table.append(self._row)
+            self._row = None
+        elif tag in ("td", "th") and self._cell is not None:
+            self._row.append(" ".join("".join(self._cell).split()))
+            self._cell = None
+
+    def handle_data(self, data):
+        if self._cell is not None:
+            self._cell.append(data)
+
+
+# Must start with a letter, so numeric cells like a year never match, but
+# digits are allowed after it because real tickers do contain them.
+TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,5}$")
+
+
+def scrape_wikipedia_symbols(session, url, label):
+    """Find the constituents table and read its ticker column."""
     r = session.get(url, timeout=40)
     r.raise_for_status()
-    html = r.text
-    # Constituent tables link each ticker to its exchange listing page.
-    pats = [
-        r'<a[^>]+href="https://www\.nyse\.com/quote/[^"]*"[^>]*>([A-Z.\-]{1,6})</a>',
-        r'<a[^>]+href="[^"]*nasdaq\.com/market-activity/stocks/[^"]*"[^>]*>'
-        r'([A-Za-z.\-]{1,6})</a>',
-        r'<td[^>]*><a[^>]+rel="nofollow"[^>]*>([A-Z][A-Z.\-]{0,5})</a>',
-    ]
-    found = []
-    for p in pats:
-        found += re.findall(p, html)
-    if not found:
-        # Fall back to the first cell of every table row.
-        found = re.findall(r'<tr>\s*<td[^>]*>\s*<a[^>]*>([A-Z][A-Z.\-]{0,5})</a>',
-                           html)
+    p = WikiTableParser()
+    p.feed(r.text)
+
+    best = []
+    for table in p.tables:
+        if len(table) < 20:
+            continue
+        header = [h.lower() for h in table[0]]
+        col = None
+        for i, h in enumerate(header):
+            if "ticker" in h or "symbol" in h:
+                col = i
+                break
+        if col is None:
+            continue
+        syms = []
+        for row in table[1:]:
+            if col >= len(row):
+                continue
+            cell = row[col].strip().upper()
+            if TICKER_RE.match(cell):
+                syms.append(cell.replace(".", "-"))
+        if len(syms) > len(best):
+            best = syms
+
     out, seen = [], set()
-    for sym in found:
-        sym = sym.strip().upper().replace(".", "-")
-        if sym and sym not in seen and len(sym) <= 6:
-            seen.add(sym)
-            out.append(sym)
-    log(f"    {symbol_col_hint}: {len(out)} tickers")
+    for s in best:
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    log(f"    {label}: {len(out)} tickers "
+        f"({len(p.tables)} wikitables on page)")
+    if not out:
+        raise SystemExit(f"could not read the {label} constituents table")
     return out
 
 
@@ -167,9 +230,16 @@ def fetch_frame(session, taxo, tag, unit, period):
 # Each metric lists the XBRL tags companies actually use, in preference order.
 # Filers are inconsistent, so every metric needs alternates or coverage craters.
 FLOW_METRICS = {
+    # Banks and insurers do not file a plain "Revenues" line at all, which is
+    # why revenue coverage sat at 65% and dragged margins and growth with it.
     "revenue": ("us-gaap", ["RevenueFromContractWithCustomerExcludingAssessedTax",
                             "Revenues", "SalesRevenueNet",
-                            "RevenueFromContractWithCustomerIncludingAssessedTax"],
+                            "RevenueFromContractWithCustomerIncludingAssessedTax",
+                            "RevenuesNetOfInterestExpense",
+                            "InterestAndDividendIncomeOperating",
+                            "SalesRevenueGoodsNet",
+                            "SalesRevenueServicesNet",
+                            "TotalRevenuesAndOtherIncome"],
                 "USD"),
     "netIncome": ("us-gaap", ["NetIncomeLoss",
                               "ProfitLoss",
@@ -213,9 +283,12 @@ INSTANT_METRICS = {
 # quarter, so any filer on an off-cycle fiscal calendar is simply absent.
 # Annual frames cover far more companies and give clean year-over-year growth,
 # so collect both and prefer whichever is available.
-FLOW_QUARTERS = 9
-INSTANT_QUARTERS = 5
-ANNUAL_YEARS = 4
+# Merging across alternate tags multiplies the request count, so trim the
+# period lists to what the maths actually needs: 6 quarters covers a TTM with
+# slack for a late filing, and 3 annual periods covers year-over-year growth.
+FLOW_QUARTERS = 6
+INSTANT_QUARTERS = 4
+ANNUAL_YEARS = 3
 
 
 def annual_periods(n):
@@ -245,32 +318,42 @@ def collect_fundamentals(session, wanted_ciks):
         for period in recent_periods(INSTANT_QUARTERS, instant=True):
             jobs.append(("i", metric, taxo, tags, unit, period))
 
-    log(f"    {len(jobs)} frame requests")
+    # Every alternate tag has to be fetched and merged, not raced. Stopping at
+    # the first tag that returned anything looks reasonable but silently drops
+    # every filer that uses a different one - which is most banks and insurers.
+    # Earlier tags win where a company reports under several.
+    filled = set()
+    total_reqs = sum(len(j[3]) for j in jobs)
+    log(f"    {len(jobs)} metric-periods, {total_reqs} frame requests")
     hits = 0
-    for i, (bucket, metric, taxo, tags, unit, period) in enumerate(jobs):
-        data = None
+    done = 0
+    for bucket, metric, taxo, tags, unit, period in jobs:
         for tag in tags:
             data = fetch_frame(session, taxo, tag, unit, period)
             time.sleep(SEC_DELAY)
-            if data:
-                break
-        if not data:
-            continue
-        hits += 1
-        for row in data:
-            cik = row.get("cik")
-            if cik in wanted_ciks and row.get("val") is not None:
+            done += 1
+            if not data:
+                continue
+            hits += 1
+            for row in data:
+                cik = row.get("cik")
+                if cik not in wanted_ciks or row.get("val") is None:
+                    continue
+                key = (cik, bucket, metric, period)
+                if key in filled:
+                    continue
+                filled.add(key)
                 store(cik, bucket, metric, period, row["val"])
-        if (i + 1) % 40 == 0:
-            log(f"    ...{i + 1}/{len(jobs)} requests, "
-                f"{len(out)} companies with data")
+            if done % 60 == 0:
+                log(f"    ...{done}/{total_reqs} requests, "
+                    f"{len(out)} companies with data")
 
     for cik, buckets in out.items():
         for bucket in buckets.values():
             for series in bucket.values():
                 series.sort(key=lambda x: x[0], reverse=True)
 
-    log(f"    {hits}/{len(jobs)} frames returned data; "
+    log(f"    {hits}/{total_reqs} frames returned data; "
         f"{len(out)} companies covered")
     return out
 
