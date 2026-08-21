@@ -664,11 +664,15 @@ function renderFundamentals(row) {
     out += metricRow(r[0], v, r[2], r[3], r[4], r[5]);
   });
 
-  var extra = '<div class="q-sub" style="border-top:1px solid var(--line);margin-top:10px">' +
-    '<div>הכנסות (12ח)<b class="mono">' + big(f.revTTM) + '</b></div>' +
-    '<div>רווח נקי<b class="mono">' + big(f.niTTM) + '</b></div>' +
-    '<div>תזרים חופשי<b class="mono">' + big(f.fcf) + '</b></div>' +
-    '<div>רווח למניה<b class="mono">' + (f.epsTTM != null ? num(f.epsTTM) : '—') + '</b></div>' +
+  var extra = '<div class="mtable" style="border-top:1px solid var(--line);margin-top:10px;padding-top:10px">' +
+    '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">הכנסות (12ח)</span>' +
+      '<span class="vl">' + big(f.revTTM) + '</span></div>' +
+    '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">רווח נקי</span>' +
+      '<span class="vl">' + big(f.niTTM) + '</span></div>' +
+    '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">תזרים חופשי</span>' +
+      '<span class="vl">' + big(f.fcf) + '</span></div>' +
+    '<div class="mrow" style="grid-template-columns:1fr auto"><span class="lb">רווח למניה</span>' +
+      '<span class="vl">' + (f.epsTTM != null ? num(f.epsTTM) : '—') + '</span></div>' +
     '</div>';
 
   return '<div class="card">' +
@@ -682,6 +686,7 @@ function renderTechnicals(t, price) {
   rows += metricRow('RSI (14)', t.rsi, '', 20, 80, 0);
   rows += metricRow('מרחק משיא 52ש׳', t.from52High, '%', -60, 0, 1);
   rows += metricRow('מעל ממוצע 50', t.vma50, '%', -20, 20, 1);
+  rows += metricRow('מעל ממוצע 150', t.vma150, '%', -30, 40, 1);
   rows += metricRow('מעל ממוצע 200', t.vma200, '%', -30, 40, 1);
   rows += metricRow('תנודתיות (ATR)', t.atrPct, '%', 8, 1, 1);
 
@@ -691,10 +696,11 @@ function renderTechnicals(t, price) {
   return '<div class="card">' +
     '<div class="card-h"><span>טכני</span><span class="sub">ללא גרפים</span></div>' +
     '<div class="mtable">' + rows + '</div>' +
-    '<div class="q-sub" style="border-top:1px solid var(--line);margin-top:10px">' +
+    '<div class="mtable" style="border-top:1px solid var(--line);margin-top:10px;padding-top:10px">' +
       perf.map(function (p) {
-        return '<div>' + p[0] + '<b class="mono ' + cls(p[1]) + '">' +
-          pct(p[1], 1) + '</b></div>';
+        return '<div class="mrow" style="grid-template-columns:1fr auto">' +
+          '<span class="lb">' + p[0] + '</span>' +
+          '<span class="vl ' + cls(p[1]) + '">' + pct(p[1], 1) + '</span></div>';
       }).join('') +
     '</div></div>';
 }
@@ -872,6 +878,9 @@ var FILTERS = [
   ['rsi', 'RSI', 0, 100,
    'מדד תנופה טכני, 0 עד 100, שמשווה ימי עליות לימי ירידות בחודש וחצי ' +
    'האחרונים. מעל 70 נחשב קנוי־יתר, מתחת ל־30 מכור־יתר.'],
+  ['vma150', 'מעל ממוצע 150 %', -80, 200,
+   'בכמה אחוזים המחיר מעל או מתחת לממוצע 150 הימים. ממוצע ביניים — ' +
+   'מעליו = מגמת ביניים חיובית, מתחתיו = שלילית.'],
   ['vma200', 'מעל ממוצע 200 %', -80, 200,
    'בכמה אחוזים המחיר מעל או מתחת לממוצע 200 הימים. מעל = מגמה ארוכת ' +
    'טווח עולה, מתחת = יורדת.'],
@@ -1449,6 +1458,25 @@ function enableSwipe() {
   }, { passive: true });
 }
 
+function enableSheetSwipe() {
+  var sheet = document.querySelector('.modal-sheet');
+  if (!sheet) return;
+  var y0 = null, st0 = 0;
+
+  sheet.addEventListener('touchstart', function (e) {
+    if (e.touches.length !== 1) { y0 = null; return; }
+    y0 = e.touches[0].clientY;
+    st0 = sheet.scrollTop;
+  }, { passive: true });
+
+  sheet.addEventListener('touchend', function (e) {
+    if (y0 == null) return;
+    var dy = e.changedTouches[0].clientY - y0;
+    y0 = null;
+    if (dy > 80 && st0 <= 0) closeSheet();
+  }, { passive: true });
+}
+
 function greet() {
   var h = new Date().getHours();
   return h < 5 ? 'לילה טוב' : h < 12 ? 'בוקר טוב'
@@ -1458,6 +1486,7 @@ function greet() {
 function boot() {
   $('#greet').textContent = greet();
   enableSwipe();
+  enableSheetSwipe();
   renderFilters();
   loadTickers();
   loadSnapshot().then(function () {
