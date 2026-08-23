@@ -55,6 +55,29 @@
       </div>
 
       <div class="card">
+        <div class="card-h"><span>ניתוח מניה</span></div>
+        <div class="search-wrap">
+          <input class="search" id="q" type="search" autocomplete="off"
+                 placeholder="חפש לפי סימבול או שם חברה…"
+                 oninput="onSearch(this.value)">
+          <div class="res" id="results"></div>
+        </div>
+        <div style="margin-top:11px" id="recentWrap"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span>השוואה</span>
+          <span class="sub">עד 3 מניות</span></div>
+        <div class="frow">
+          <input id="c-sym" placeholder="הוסף סימבול" autocomplete="off"
+                 autocapitalize="characters">
+          <button class="btn ghost" style="max-width:96px"
+                  onclick="addCompare()">הוסף</button>
+        </div>
+        <div id="compare"></div>
+      </div>
+
+      <div class="card">
         <div class="card-h"><span>מה השתנה</span>
           <span class="sub" id="chgSince"></span></div>
         <div id="changes"><div class="msg">טוען…</div></div>
@@ -78,28 +101,7 @@
         <div id="sectors"><div class="msg">טוען…</div></div>
       </div>
 
-      <div class="card">
-        <div class="card-h"><span>השוואה</span>
-          <span class="sub">עד 3 מניות</span></div>
-        <div class="frow">
-          <input id="c-sym" placeholder="הוסף סימבול" autocomplete="off"
-                 autocapitalize="characters">
-          <button class="btn ghost" style="max-width:96px"
-                  onclick="addCompare()">הוסף</button>
-        </div>
-        <div id="compare"></div>
-      </div>
 
-      <div class="card">
-        <div class="card-h"><span>ניתוח מניה</span></div>
-        <div class="search-wrap">
-          <input class="search" id="q" type="search" autocomplete="off"
-                 placeholder="חפש לפי סימבול או שם חברה…"
-                 oninput="onSearch(this.value)">
-          <div class="res" id="results"></div>
-        </div>
-        <div style="margin-top:11px" id="recentWrap"></div>
-      </div>
     </section>
 
     <!-- ============================================ watch ============== -->
@@ -124,10 +126,16 @@
       </div>
 
       <div class="card">
-        <div class="card-h"><span>התראות מחיר</span>
+        <button class="card-h fold-t" data-fold="alerts"
+                onclick="toggleFold('alerts')">
+          <span>התראות מחיר</span>
           <span class="sub"><span id="syncStateWatch"></span>
-            <span id="alertCount"></span></span></div>
-        <div id="alertsList"><div class="msg">אין התראות.</div></div>
+            <span id="alertCount"></span></span>
+          <i class="chev"></i>
+        </button>
+        <div class="fold" id="fold-alerts">
+          <div><div id="alertsList"><div class="msg">אין התראות.</div></div></div>
+        </div>
         <div style="margin-top:13px">
           <div class="frow">
             <input id="a-sym" placeholder="סימבול" autocomplete="off"
@@ -218,12 +226,6 @@
         </div>
         <div class="score-note">כמה אתה מוכן להפסיד בעסקה בודדת. מקובל
           0.5%–2% מהתיק.</div>
-      </div>
-
-      <div class="card">
-        <div class="card-h"><span>פתוחות</span>
-          <span class="sub" id="tradeCount"></span></div>
-        <div id="tradesList"><div class="msg">אין עסקאות פתוחות.</div></div>
       </div>
 
       <div class="card">

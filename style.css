@@ -991,3 +991,53 @@ a.btn { display: block; text-decoration: none; }
 }
 .mv.up { color: var(--gain); }
 .mv.down { color: var(--loss); }
+
+/* ------------------------------------------------------------- folding */
+/* grid-template-rows 0fr -> 1fr animates to the content's real height, so a
+   section of any length opens without being clipped by a guessed max-height. */
+.fold {
+  display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows .3s cubic-bezier(.22, 1, .36, 1);
+}
+.fold > * { overflow: hidden; min-height: 0; }
+.fold.open { grid-template-rows: 1fr; }
+
+/* A card heading that is also the toggle. */
+.card-h.fold-t {
+  width: 100%; text-align: start; padding: 0;
+  margin-bottom: 0; cursor: pointer;
+}
+.card-h.fold-t.open { margin-bottom: 14px; }
+.chev {
+  width: 9px; height: 9px; flex: none; margin-inline-start: 2px;
+  /* Physical borders, not logical: border-inline-end flips in RTL, which
+     turned the chevron sideways instead of pointing down at what it opens. */
+  border-right: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+  transform: rotate(45deg); transform-origin: 60% 60%;
+  transition: transform .28s cubic-bezier(.22, 1, .36, 1);
+}
+.fold-t.open .chev, .day-h.open .chev { transform: rotate(-135deg); }
+
+/* ---- earnings, grouped by day ---- */
+.day { margin-bottom: 8px; }
+.day:last-child { margin-bottom: 0; }
+.day-h {
+  display: flex; align-items: center; gap: 9px; width: 100%;
+  padding: 11px 13px; border-radius: var(--r-md);
+  background: var(--surface-2); text-align: start;
+  transition: background .16s;
+}
+.day-h:active { background: var(--primary-soft); }
+.day-h.soon { background: rgba(207, 138, 31, .12); }
+.day-n { font-size: .85rem; font-weight: 800; }
+.day-h.soon .day-n { color: #a06a12; }
+.day-d { font-size: .7rem; color: var(--muted); flex: 1; }
+.day-c {
+  font-size: .7rem; font-weight: 700; color: var(--ink-2);
+  background: var(--surface); border-radius: 999px;
+  min-width: 20px; text-align: center; padding: 2px 6px;
+}
+.day .fold > div { padding-top: 8px; }
+/* The date badge moved into the day header, so the row is two columns now. */
+.day .ern { grid-template-columns: minmax(0, 1fr) auto; }

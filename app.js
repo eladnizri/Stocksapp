@@ -51,7 +51,8 @@ var LS = {
   trades: 'sa_trades',
   risk: 'sa_risk',
   watch: 'sa_watch',
-  compare: 'sa_compare'
+  compare: 'sa_compare',
+  folds: 'sa_folds'
 };
 
 var store = {
@@ -1208,6 +1209,7 @@ function renderAlerts() {
   if (!list.length) {
     box.innerHTML = '<div class="msg">אין התראות עדיין.</div>';
     $('#alertCount').textContent = '';
+    applyFold('alerts', false);
     return;
   }
   box.innerHTML = list.map(function (a, i) {
@@ -1238,6 +1240,7 @@ function renderAlerts() {
       '</div>';
   }).join('');
   $('#alertCount').textContent = list.length + ' פעילות';
+  applyFold('alerts', false);
 }
 
 /* Symbols worth a live price: everything alerted, plus every open trade even
@@ -2342,8 +2345,6 @@ function runScreen() {
 var TICKERS = [
   ['^GSPC', 'S&P 500', 0],
   ['^IXIC', 'נאסד״ק', 0],
-  ['^DJI', 'דאו ג׳ונס', 0],
-  ['^RUT', 'ראסל 2000', 0],
   ['^VIX', 'VIX', 2],
   ['BTC-USD', 'ביטקוין', 0]
 ];
@@ -2522,6 +2523,35 @@ function renderChanges() {
     '<div class="msg">אין שינויים בולטים מאז הסריקה הקודמת.</div>';
 }
 
+/* ---------------------------------------------------------- folding ---- */
+/* Sections that are reference material rather than something you read every
+   time. Collapsed by default and remembered, so the page stays short. */
+function foldOpen(key, dflt) {
+  var f = store.get(LS.folds, {});
+  return f[key] === undefined ? !!dflt : !!f[key];
+}
+
+function toggleFold(key) {
+  var el = $('#fold-' + key);
+  if (!el) return;
+  var open = !el.classList.contains('open');
+  el.classList.toggle('open', open);
+  var btn = document.querySelector('[data-fold="' + key + '"]');
+  if (btn) btn.classList.toggle('open', open);
+  var f = store.get(LS.folds, {});
+  f[key] = open;
+  store.set(LS.folds, f);
+}
+
+/* Applies the remembered state to a fold that has just been rendered. */
+function applyFold(key, dflt) {
+  var el = $('#fold-' + key);
+  var btn = document.querySelector('[data-fold="' + key + '"]');
+  var open = foldOpen(key, dflt);
+  if (el) el.classList.toggle('open', open);
+  if (btn) btn.classList.toggle('open', open);
+}
+
 /* Reports due in the next week, from dates already in the snapshot. */
 function renderEarningsSoon(days) {
   var el = $('#earnSoon');
@@ -2562,25 +2592,53 @@ function renderEarningsSoon(days) {
     return t === 'pre' ? 'לפני הפתיחה' : t === 'post' ? 'אחרי הנעילה' : '';
   };
 
-  el.innerHTML = list.slice(0, 30).map(function (x) {
-    var r = x.r, s = slot(r.er.t);
-    return '<button class="ern" onclick="analyze(\'' + esc(r.s) + '\')">' +
-      '<span class="ern-d' + (x.n <= 1 ? ' soon' : '') + '">' +
-        '<b>' + x.d.toLocaleDateString('he-IL', { day: 'numeric' }) + '</b>' +
-        '<i>' + x.d.toLocaleDateString('he-IL', { month: 'short' }) + '</i>' +
-      '</span>' +
-      '<span class="ern-id">' +
-        '<span class="sym">' + esc(r.s) + '</span>' +
-        '<span class="nm">' + esc(r.n || '') + '</span>' +
-        '<span class="mini">' + when(x.n) + (s ? ' · ' + s : '') +
-          (r.er.eps ? ' · צפי ' + esc(r.er.eps) : '') + '</span>' +
-      '</span>' +
-      '<span class="ern-sc" style="color:' + scoreColor(r.sc && r.sc.total) +
-        '">' + ((r.sc && r.sc.total != null) ? r.sc.total : '—') + '</span>' +
-      '</button>';
-  }).join('') +
-  (list.length > 30 ? '<div class="score-note" style="margin-top:9px">מוצגים ' +
-    '30 מתוך ' + list.length + '.</div>' : '');
+  /* Grouped by day and folded away. A flat list of thirty companies pushed
+     everything below it off the page, for something that gets looked up
+     rather than read. */
+  var order = [];
+  var byDay = {};
+  list.forEach(function (x) {
+    if (!byDay[x.n]) { byDay[x.n] = []; order.push(x.n); }
+    byDay[x.n].push(x);
+  });
+
+  el.innerHTML = order.map(function (n) {
+    var group = byDay[n];
+    var d = group[0].d;
+    var key = 'ern' + n;
+    return '<div class="day">' +
+      '<button class="day-h' + (n <= 1 ? ' soon' : '') + '" data-fold="' +
+        key + '" onclick="toggleFold(\'' + key + '\')">' +
+        '<span class="day-n">' + when(n) + '</span>' +
+        '<span class="day-d">' +
+          d.toLocaleDateString('he-IL', { weekday: 'long' }) + ' · ' +
+          d.toLocaleDateString('he-IL', { day: 'numeric', month: 'short' }) +
+        '</span>' +
+        '<span class="day-c">' + group.length + '</span>' +
+        '<i class="chev"></i>' +
+      '</button>' +
+      '<div class="fold" id="fold-' + key + '"><div>' +
+        group.map(function (x) {
+          var r = x.r, sl = slot(r.er.t);
+          return '<button class="ern" onclick="analyze(\'' + esc(r.s) + '\')">' +
+            '<span class="ern-id">' +
+              '<span class="sym">' + esc(r.s) + '</span>' +
+              '<span class="nm">' + esc(r.n || '') + '</span>' +
+              '<span class="mini">' + (sl || '—') +
+                (r.er.eps ? ' · צפי ' + esc(r.er.eps) : '') + '</span>' +
+            '</span>' +
+            '<span class="ern-sc" style="color:' +
+              scoreColor(r.sc && r.sc.total) + '">' +
+              ((r.sc && r.sc.total != null) ? r.sc.total : '—') +
+            '</span>' +
+            '</button>';
+        }).join('') +
+      '</div></div>' +
+      '</div>';
+  }).join('');
+
+  // Closed unless opened before; today and tomorrow start open.
+  order.forEach(function (n) { applyFold('ern' + n, n <= 1); });
 }
 
 /* Kept as the single place that reports snapshot trouble. The card it used to
