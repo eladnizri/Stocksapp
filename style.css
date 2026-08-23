@@ -96,11 +96,17 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .page::-webkit-scrollbar { display: none; }
 /* Cards settle in when their page becomes the active one, so arriving on a
    tab reads as arriving somewhere rather than a static repaint. */
-.page.enter .card { animation: rise .5s cubic-bezier(.22, 1, .36, 1) backwards; }
-.page.enter .card:nth-child(1) { animation-delay: .02s; }
-.page.enter .card:nth-child(2) { animation-delay: .08s; }
-.page.enter .card:nth-child(3) { animation-delay: .14s; }
-.page.enter .card:nth-child(4) { animation-delay: .2s; }
+/* The delays count from 2, because .head is the page's first child and the
+   cards start after it - anchored at 1 the last card would have had no rule,
+   fall back to zero delay, and animate ahead of the ones above it. */
+.page.enter .card {
+  animation: rise .5s cubic-bezier(.22, 1, .36, 1) backwards;
+  animation-delay: .18s;
+}
+.page.enter .card:nth-child(2) { animation-delay: .02s; }
+.page.enter .card:nth-child(3) { animation-delay: .07s; }
+.page.enter .card:nth-child(4) { animation-delay: .12s; }
+.page.enter .card:nth-child(5) { animation-delay: .17s; }
 
 .head {
   padding: calc(env(safe-area-inset-top) + 18px) 0 14px;
