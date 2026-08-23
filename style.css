@@ -852,3 +852,58 @@ a.btn { display: block; text-decoration: none; }
   background: var(--surface); color: var(--ink-2);
   border: 1px solid var(--border);
 }
+
+/* ---- trade: tag, note, stop suggestions, open exposure ---- */
+.tr-tag {
+  font-size: .64rem; font-weight: 700; padding: 3px 8px;
+  border-radius: 999px; background: var(--surface); color: var(--ink-2);
+  border: 1px solid var(--border); white-space: nowrap;
+}
+.tr-note {
+  font-size: .74rem; color: var(--ink-2); line-height: 1.5;
+  margin-top: 6px; padding-inline-start: 9px;
+  border-inline-start: 2px solid var(--border);
+}
+.tr-meta .safe { color: var(--gain); font-weight: 700; }
+.tr-moves { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.tr-moves .chip {
+  background: var(--surface); border: 1px solid var(--border);
+  color: var(--primary-500); font-size: .74rem;
+}
+.tr-moves .chip.be { color: #a06a12; background: rgba(207, 138, 31, .1); }
+.trade.editing { background: var(--surface); border: 1px solid var(--primary); }
+.trade.editing .frow { margin-bottom: 8px; }
+
+/* What every open stop would cost if hit from here. */
+.expo {
+  display: grid; grid-template-columns: auto 1fr; gap: 2px 9px;
+  align-items: baseline;
+  padding: 11px 13px; margin-bottom: 10px;
+  border-radius: var(--r-md); background: rgba(207, 138, 31, .10);
+}
+.ex-k { font-size: .74rem; font-weight: 600; color: #8a5d10; }
+.ex-v {
+  font-size: .92rem; font-weight: 800; color: #8a5d10; text-align: end;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.ex-n { grid-column: 1 / -1; font-size: .68rem; color: var(--ink-2); }
+.ex-n:empty { display: none; }
+
+/* Per-setup expectancy in the journal. */
+.tagstats {
+  padding: 11px 12px; margin-bottom: 11px;
+  border-radius: var(--r-md); background: var(--surface-2);
+}
+.tstat {
+  display: grid; grid-template-columns: auto 1fr auto;
+  align-items: baseline; gap: 9px; margin-bottom: 6px;
+}
+.tstat:last-of-type { margin-bottom: 0; }
+.tk-name { font-size: .8rem; font-weight: 700; }
+.tk-n { font-size: .68rem; color: var(--muted); }
+.tk-r {
+  font-size: .84rem; font-weight: 800;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.tk-r.up { color: var(--gain); }
+.tk-r.down { color: var(--loss); }

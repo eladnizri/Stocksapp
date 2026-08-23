@@ -167,6 +167,14 @@
           <button class="btn ghost" style="max-width:124px;white-space:nowrap"
                   onclick="suggestSize()">חשב כמות</button>
         </div>
+        <div class="frow">
+          <input id="t-tag" placeholder="סוג סטאפ" autocomplete="off"
+                 list="setupTags">
+          <datalist id="setupTags"></datalist>
+        </div>
+        <div class="frow">
+          <input id="t-note" placeholder="למה נכנסת" autocomplete="off">
+        </div>
         <div id="t-guard"></div>
         <div class="frow" style="margin-top:2px">
           <button class="btn" onclick="addTrade()">פתח עסקה</button>

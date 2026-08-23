@@ -1142,11 +1142,24 @@ function suggestLevels(sym, entry) {
 
 function touchField(el) { el.dataset.touched = '1'; }
 
+/* Tags already used, offered as completions so the same setup keeps the same
+   name - the journal's per-setup breakdown is only as good as that. */
+function paintTagList() {
+  var el = $('#setupTags');
+  if (!el) return;
+  var seen = {};
+  trades().forEach(function (t) { if (t.tag) seen[t.tag] = 1; });
+  el.innerHTML = Object.keys(seen).sort().map(function (t) {
+    return '<option value="' + esc(t) + '">';
+  }).join('');
+}
+
 function resetTradeForm() {
-  ['t-sym', 't-entry', 't-stop', 't-target', 't-qty'].forEach(function (id) {
-    var el = $('#' + id);
-    if (el) { el.value = ''; delete el.dataset.touched; }
-  });
+  ['t-sym', 't-entry', 't-stop', 't-target', 't-qty', 't-tag', 't-note']
+    .forEach(function (id) {
+      var el = $('#' + id);
+      if (el) { el.value = ''; delete el.dataset.touched; }
+    });
   $('#t-guard').innerHTML = '';
   $('#tSugNote').textContent = '';
 }
@@ -1299,7 +1312,12 @@ function addTrade() {
     target: isNaN(target) ? null : target,
     qty: isNaN(qty) ? null : qty,
     opened: new Date().toISOString().slice(0, 10),
-    status: 'open'
+    status: 'open',
+    tag: ($('#t-tag').value || '').trim(),
+    note: ($('#t-note').value || '').trim(),
+    // High-water mark, for the trailing stop. Seeded at entry so a trade that
+    // never goes green cannot suggest a trail above where it started.
+    hi: entry
   });
   setTrades(list);
   syncTradeAlerts();
@@ -1350,6 +1368,89 @@ function deleteTrade(id) {
   renderTrades();
 }
 
+/* ------------------------------------------------- stop management ----- */
+var TRAIL_ATR = 3;   // chandelier distance below the high since entry
+
+/* Tracks the highest price seen while a trade has been open. The app only
+   sees prices while it is running, so this is "the highest this app has
+   observed", not the true session high - which is why the trail is offered as
+   a suggestion to accept rather than applied on its own. */
+function trackHighs() {
+  var list = trades();
+  var moved = false;
+  list.forEach(function (t) {
+    if (t.status === 'closed') return;
+    var p = ALERT_PRICES[t.s];
+    if (p == null) return;
+    var hi = t.hi != null ? t.hi : t.entry;
+    if (p > hi) { t.hi = p; moved = true; }
+  });
+  if (moved) setTrades(list);
+  return moved;
+}
+
+/* What the stop could become, given where price has been. Never loosens a
+   stop: a suggestion only appears when it would sit higher than the current
+   one, because moving a stop down turns a defined risk into an open one. */
+function stopMoves(t) {
+  var out = [];
+  if (t.status === 'closed') return out;
+  var price = tradePrice(t);
+  var r = tradeR(t, price);
+
+  // Breakeven once the trade has paid for its own risk.
+  if (r != null && r >= 1 && t.stop < t.entry) {
+    out.push({ k: 'be', to: t.entry, label: 'העבר לאיזון' });
+  }
+
+  var row = SNAP_BY_SYM[t.s];
+  var atr = row && row.t && row.t.atr;
+  var hi = t.hi != null ? t.hi : t.entry;
+  if (atr) {
+    var trail = hi - TRAIL_ATR * atr;
+    // Only worth offering if it is both above the current stop and not above
+    // the price itself, which would stop the trade out on the spot.
+    if (trail > t.stop && (price == null || trail < price)) {
+      out.push({ k: 'trail', to: trail,
+                 label: 'סטופ נגרר ' + money(trail) });
+    }
+  }
+  return out;
+}
+
+function applyStop(id, to) {
+  var list = trades();
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].id === id) {
+      if (to <= list[i].stop) return;    // never loosen
+      list[i].stop = Math.round(to * 100) / 100;
+    }
+  }
+  setTrades(list);
+  syncTradeAlerts();
+  renderTrades();
+  haptic(12);
+}
+
+/* ------------------------------------------------------- open exposure -- */
+/* What would be lost if every open stop were hit from here. A trade whose
+   stop has been raised past its entry contributes nothing - it is protected -
+   so it is counted separately rather than as negative risk. */
+function openRisk() {
+  var money_ = 0, rSum = 0, protectedCount = 0, sized = 0;
+  openTrades().forEach(function (t) {
+    var price = tradePrice(t);
+    var risk = t.entry - t.stop;
+    if (t.stop >= t.entry) protectedCount++;
+    if (price == null || !t.qty) return;
+    sized++;
+    var perShare = Math.max(0, price - t.stop);
+    money_ += perShare * t.qty;
+    if (risk > 0) rSum += perShare / risk;
+  });
+  return { money: money_, r: rSum, protected: protectedCount, sized: sized };
+}
+
 function tradeR(t, price) {
   var risk = t.entry - t.stop;
   if (!risk || price == null) return null;
@@ -1385,14 +1486,26 @@ function tradeCardHtml(t) {
   var bad = tradeGuard(t.s, t.entry, t.stop, t.target)
     .filter(function (x) { return x[0] === 'bad'; });
 
+  if (EDITING === t.id) return tradeEditHtml(t);
+
+  var moves = stopMoves(t);
+  var movesHtml = moves.length
+    ? '<div class="tr-moves">' + moves.map(function (m) {
+        return '<button class="chip ' + (m.k === 'be' ? 'be' : '') +
+          '" onclick="applyStop(' + t.id + ',' + m.to + ')">' +
+          esc(m.label) + '</button>';
+      }).join('') + '</div>'
+    : '';
+
   return '<div class="trade">' +
     '<div class="tr-top">' +
       '<button class="tr-sym" onclick="analyze(\'' + esc(t.s) + '\')">' +
         esc(t.s) + '</button>' +
+      (t.tag ? '<span class="tr-tag">' + esc(t.tag) + '</span>' : '') +
       '<span class="tr-r ' + cls(r) + '">' +
         (r == null ? '—' : (r > 0 ? '+' : '') + num(r, 2) + 'R') + '</span>' +
-      '<button class="tr-x" onclick="deleteTrade(' + t.id +
-        ')" aria-label="מחק">✕</button>' +
+      '<button class="tr-x" onclick="editTrade(' + t.id +
+        ')" aria-label="ערוך">✎</button>' +
     '</div>' +
     '<div class="tr-now">' +
       '<span class="pr">' + (price == null ? '…' : money(price)) + '</span>' +
@@ -1413,11 +1526,100 @@ function tradeCardHtml(t) {
     '</div>' +
     '<div class="tr-meta">כניסה ' + money(t.entry) +
       (t.qty ? ' · ' + t.qty + ' מניות · סיכון ' + money(risk * t.qty) : '') +
-      ' · ' + esc(t.opened) + '</div>' +
+      ' · ' + esc(t.opened) +
+      (t.stop >= t.entry ? ' · <b class="safe">מוגנת</b>' : '') + '</div>' +
+    (t.note ? '<div class="tr-note">' + esc(t.note) + '</div>' : '') +
+    movesHtml +
     (bad.length ? guardHtml(bad) : '') +
     '<button class="btn ghost" style="margin-top:9px" onclick="closeTrade(' +
       t.id + ')">סגור עסקה</button>' +
     '</div>';
+}
+
+/* Editing an open trade.
+ *
+ * Without this a stop could never be moved, only deleted along with the whole
+ * trade - which made a trailing stop impossible and lost the trade's history
+ * every time you wanted to adjust a level. */
+var EDITING = null;
+
+function editTrade(id) { EDITING = id; paintTrades(); }
+function cancelEdit() { EDITING = null; paintTrades(); }
+
+function tradeEditHtml(t) {
+  var f = function (id, ph, val) {
+    return '<input id="e-' + id + '" inputmode="decimal" placeholder="' + ph +
+      '" value="' + (val == null ? '' : val) + '">';
+  };
+  return '<div class="trade editing">' +
+    '<div class="tr-top">' +
+      '<span class="tr-sym">' + esc(t.s) + '</span>' +
+      '<span class="tr-r" style="color:var(--ink-2);font-size:.78rem">עריכה</span>' +
+    '</div>' +
+    '<div class="frow" style="margin-top:9px">' +
+      f('stop', 'סטופ', t.stop) + f('target', 'יעד', t.target) +
+    '</div>' +
+    '<div class="frow">' +
+      f('entry', 'כניסה', t.entry) + f('qty', 'כמות', t.qty) +
+    '</div>' +
+    '<div class="frow">' +
+      '<input id="e-tag" placeholder="סוג סטאפ" value="' + esc(t.tag || '') + '">' +
+    '</div>' +
+    '<div class="frow">' +
+      '<input id="e-note" placeholder="למה נכנסת" value="' + esc(t.note || '') + '">' +
+    '</div>' +
+    '<div class="score-note" id="e-err" style="margin-bottom:8px"></div>' +
+    '<div class="frow">' +
+      '<button class="btn" onclick="saveEdit(' + t.id + ')">שמור</button>' +
+      '<button class="btn ghost" style="max-width:80px" onclick="cancelEdit()">בטל</button>' +
+      '<button class="btn ghost" style="max-width:64px;color:var(--alert)" ' +
+        'onclick="deleteTrade(' + t.id + ')">מחק</button>' +
+    '</div>' +
+    '</div>';
+}
+
+function saveEdit(id) {
+  var stop = parseFloat($('#e-stop').value);
+  var target = parseFloat($('#e-target').value);
+  var entry = parseFloat($('#e-entry').value);
+  var qty = parseFloat($('#e-qty').value);
+  var err = $('#e-err');
+
+  if (isNaN(entry) || isNaN(stop)) {
+    err.textContent = 'צריך כניסה וסטופ'; err.style.color = 'var(--alert)';
+    return;
+  }
+  /* A stop above the entry is the whole point of trailing one - it locks in
+     profit - so the rule here is only that it must sit below where the trade
+     would actually exit. Requiring it below entry, as creation does, made a
+     protected trade impossible to trail any further. */
+  var list = trades();
+  var cur = null;
+  for (var j = 0; j < list.length; j++) if (list[j].id === id) cur = list[j];
+  var price = cur ? tradePrice(cur) : null;
+  var ceiling = price != null ? price : entry;
+  if (stop >= ceiling) {
+    err.textContent = price != null
+      ? 'הסטופ מעל המחיר הנוכחי — העסקה תיסגר מיד'
+      : 'הסטופ חייב להיות מתחת לכניסה';
+    err.style.color = 'var(--alert)';
+    return;
+  }
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].id !== id) continue;
+    list[i].entry = entry;
+    list[i].stop = stop;
+    list[i].target = isNaN(target) ? null : target;
+    list[i].qty = isNaN(qty) ? null : qty;
+    list[i].tag = ($('#e-tag').value || '').trim();
+    list[i].note = ($('#e-note').value || '').trim();
+    if (list[i].hi == null || list[i].hi < entry) list[i].hi = entry;
+  }
+  setTrades(list);
+  EDITING = null;
+  syncTradeAlerts();     // the stop and target alerts follow the new levels
+  renderTrades();
+  haptic(12);
 }
 
 /* Paints both lists and nothing else.
@@ -1425,15 +1627,35 @@ function tradeCardHtml(t) {
  * Kept free of side effects on purpose: a live quote arriving has to repaint
  * the cards, and if painting also fetched, that would loop. */
 function paintTrades() {
+  trackHighs();          // before rendering, so a new high can offer a trail
   var open = openTrades();
   var cards = open.length ? open.map(tradeCardHtml).join('') : null;
+  var risk = openRisk();
+  var cfg = riskCfg();
+  var riskHtml = '';
+  if (open.length) {
+    var pctOfAcct = (cfg.acct && risk.money)
+      ? ' · ' + num((risk.money / cfg.acct) * 100, 1) + '% מהתיק' : '';
+    riskHtml = '<div class="expo">' +
+      '<span class="ex-k">סיכון פתוח</span>' +
+      '<span class="ex-v">' + (risk.sized ? money(risk.money) : '—') +
+        (risk.sized && risk.r ? ' · ' + num(risk.r, 2) + 'R' : '') + '</span>' +
+      '<span class="ex-n">' +
+        (risk.protected ? risk.protected + ' מוגנות' : '') +
+        (risk.sized < open.length
+          ? (risk.protected ? ' · ' : '') +
+            (open.length - risk.sized) + ' ללא כמות' : '') +
+        pctOfAcct + '</span>' +
+      '</div>';
+  }
 
   var hb = $('#homeTrades');
   if (hb) {
-    hb.innerHTML = cards ||
-      '<div class="msg">אין עסקאות פתוחות. ' +
-      '<button class="chip" style="margin-top:8px" onclick="goTab(\'trades\')">' +
-      'פתח סטאפ</button></div>';
+    hb.innerHTML = cards
+      ? riskHtml + cards
+      : '<div class="msg">אין עסקאות פתוחות. ' +
+        '<button class="chip" style="margin-top:8px" onclick="goTab(\'trades\')">' +
+        'פתח סטאפ</button></div>';
   }
   // The stamp matters here: a frozen price is invisible without it, and this
   // card is the one you would act on.
@@ -1447,9 +1669,10 @@ function paintTrades() {
 
   var tb = $('#tradesList');
   if (tb) {
-    tb.innerHTML = cards ||
-      '<div class="msg">אין עסקאות פתוחות. הזן סימבול ומחיר כניסה למעלה — ' +
-      'הסטופ והיעד יוצעו לפי ATR.</div>';
+    tb.innerHTML = cards
+      ? riskHtml + cards
+      : '<div class="msg">אין עסקאות פתוחות. הזן סימבול ומחיר כניסה למעלה — ' +
+        'הסטופ והיעד יוצעו לפי ATR.</div>';
   }
   var tc = $('#tradeCount');
   if (tc) tc.textContent = open.length ? open.length + ' פתוחות' + stamp : '';
@@ -1464,6 +1687,7 @@ function renderHome() {
 
 function renderTrades() {
   paintRiskNote();
+  paintTagList();
   var c = riskCfg();
   if ($('#r-acct') && !$('#r-acct').value && c.acct) $('#r-acct').value = c.acct;
   if ($('#r-pct') && !$('#r-pct').value && c.pct != null) $('#r-pct').value = c.pct;
@@ -1493,11 +1717,40 @@ function renderJournal() {
       Math.round((wins / rs.length) * 100) + '% מוצלחות · ' +
       (total > 0 ? '+' : '') + num(total, 1) + 'R';
   }
-  box.innerHTML = done.slice(0, 30).map(function (t) {
+  /* Per-setup expectancy. This is the number that says which setup is
+     actually paying, and it only exists because trades carry a tag. */
+  var byTag = {};
+  done.forEach(function (t) {
+    var r = tradeR(t, t.exit);
+    if (r == null || !t.tag) return;
+    (byTag[t.tag] = byTag[t.tag] || []).push(r);
+  });
+  var tags = Object.keys(byTag).sort(function (a, b) {
+    var av = byTag[a].reduce(function (x, y) { return x + y; }, 0) / byTag[a].length;
+    var bv = byTag[b].reduce(function (x, y) { return x + y; }, 0) / byTag[b].length;
+    return bv - av;
+  });
+  var tagHtml = tags.length ? '<div class="tagstats">' + tags.map(function (k) {
+    var rs2 = byTag[k];
+    var avg = rs2.reduce(function (a, v) { return a + v; }, 0) / rs2.length;
+    var w = rs2.filter(function (v) { return v > 0; }).length;
+    return '<div class="tstat">' +
+      '<span class="tk-name">' + esc(k) + '</span>' +
+      '<span class="tk-n">' + rs2.length + ' עסקאות · ' +
+        Math.round((w / rs2.length) * 100) + '%</span>' +
+      '<span class="tk-r ' + cls(avg) + '">' + (avg > 0 ? '+' : '') +
+        num(avg, 2) + 'R</span>' +
+      '</div>';
+  }).join('') + '<div class="score-note" style="margin-top:7px">תוחלת ממוצעת ' +
+    'לעסקה, לפי סוג סטאפ. אחרי כמה עשרות עסקאות זה מראה מה באמת עובד לך.' +
+    '</div></div>' : '';
+
+  box.innerHTML = tagHtml + done.slice(0, 30).map(function (t) {
     var r = tradeR(t, t.exit);
     return '<div class="jrow">' +
       '<span class="sym">' + esc(t.s) + '</span>' +
-      '<span class="dt">' + esc(t.opened) + ' → ' + esc(t.closed || '') + '</span>' +
+      '<span class="dt">' + (t.tag ? esc(t.tag) + ' · ' : '') +
+        esc(t.closed || t.opened) + '</span>' +
       '<span class="r ' + cls(r) + '">' +
         (r == null ? '—' : (r > 0 ? '+' : '') + num(r, 2) + 'R') + '</span>' +
       '<button class="tr-x" onclick="deleteTrade(' + t.id +
