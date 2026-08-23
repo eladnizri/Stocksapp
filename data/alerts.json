@@ -1,4 +1,34 @@
 {
-  "_comment": "Alerts checked by .github/workflows/alerts.yml. Edit here or paste from the app (Settings -> alerts sync). d is 'above' or 'below'; p is the price in dollars.",
-  "alerts": []
+  "alerts": [
+    {
+      "s": "IREN",
+      "d": "above",
+      "p": 46.55
+    },
+    {
+      "s": "FANG",
+      "d": "below",
+      "p": 195
+    },
+    {
+      "s": "AXON",
+      "d": "above",
+      "p": 657
+    },
+    {
+      "s": "NFLX",
+      "d": "above",
+      "p": 82
+    },
+    {
+      "s": "WDC",
+      "d": "above",
+      "p": 570
+    },
+    {
+      "s": "MMM",
+      "d": "above",
+      "p": 190
+    }
+  ]
 }
