@@ -34,7 +34,23 @@ BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 "
               "Safari/537.36")
 
-NTFY_HOST = os.environ.get("NTFY_HOST", "https://ntfy.sh")
+def ntfy_host():
+    """Base URL for ntfy, defaulting when the variable is unset OR empty.
+
+    An undefined repository variable reaches the job as an empty string, not
+    as a missing key, so os.environ.get(name, default) hands back "" and the
+    default never applies - which posted every notification to an empty URL.
+    A bare hostname also gets a scheme, since requests rejects it otherwise.
+    """
+    host = (os.environ.get("NTFY_HOST") or "").strip().rstrip("/")
+    if not host:
+        return "https://ntfy.sh"
+    if "://" not in host:
+        host = "https://" + host
+    return host
+
+
+NTFY_HOST = ntfy_host()
 REARM_PCT = 1.0     # how far back past the line before it can fire again
 FETCH_DELAY = 0.15  # polite spacing between quote requests
 
@@ -175,7 +191,7 @@ def notify(topic, title, message, tags, dry_run):
         log(f"    [dry-run] {title} :: {message}")
         return True
     try:
-        r = requests.post(NTFY_HOST, json={
+        r = requests.post(ntfy_host(), json={
             "topic": topic,
             "title": title,
             "message": message,
@@ -256,6 +272,7 @@ def main():
     live_keys = {alert_key(a) for a in alerts}
     changed = False
     sent = 0
+    failed = 0
 
     for a in alerts:
         key = alert_key(a)
@@ -291,6 +308,10 @@ def main():
             state[key] = {"fired": now, "price": price}
             changed = True
             log(f"    FIRED {a['s']} {a['d']} {a['p']} at {price}")
+        else:
+            # Deliberately not recorded as fired, so the next run tries again
+            # rather than treating an undelivered alert as delivered.
+            failed += 1
 
     # An alert deleted from alerts.json should not leave its state behind.
     for key in [k for k in state if k not in live_keys]:
@@ -310,6 +331,12 @@ def main():
     if gh_out:
         with open(gh_out, "a") as fh:
             fh.write(f"changed={'true' if changed else 'false'}\n")
+
+    if failed:
+        # A green run that quietly delivered nothing is the worst outcome
+        # here: the alert looks handled and never arrives. Fail loudly.
+        log(f"ERROR: {failed} notification(s) could not be delivered.")
+        return 1
     return 0
 
 

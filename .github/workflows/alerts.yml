@@ -49,6 +49,9 @@ jobs:
         id: check
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          # An undefined repository variable arrives as an empty string rather
+          # than as an absent key, so the script treats empty as unset too.
+          # Only override this to point at a self-hosted ntfy.
           NTFY_HOST: ${{ vars.NTFY_HOST }}
         run: |
           python scripts/check_alerts.py \
