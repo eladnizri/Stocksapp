@@ -1669,6 +1669,13 @@ function openRisk() {
   return { money: money_, r: rSum, protected: protectedCount, sized: sized };
 }
 
+/* What a closed trade actually made or lost. Per share when no size was
+   recorded, which is still an answer. */
+function tradeResult(t) {
+  if (t.exit == null) return null;
+  return (t.exit - t.entry) * (t.qty || 1);
+}
+
 function tradeR(t, price) {
   var risk = t.entry - t.stop;
   if (!risk || price == null) return null;
@@ -1684,12 +1691,28 @@ function tradePrice(t) {
   return price;
 }
 
+/* The three numbers a trade is actually asking about, all measured the same
+   way: what this trade will have made or lost when it is over. Quoting the
+   live one from entry and the other two from the current price would have
+   made them look unrelated. Without a size they are per share, which is still
+   an answer rather than a dash. */
+function tradeMoney(t) {
+  var price = tradePrice(t);
+  var per = t.qty || 1;
+  return {
+    perShare: !t.qty,
+    now: price == null ? null : (price - t.entry) * per,
+    ifStopped: (t.stop - t.entry) * per,
+    ifTarget: t.target == null ? null : (t.target - t.entry) * per
+  };
+}
+
 /* One card, rendered the same on the home screen and on the trades tab. */
 function tradeCardHtml(t) {
   var price = tradePrice(t);
-  var r = tradeR(t, price);
   var risk = t.entry - t.stop;
-  var pl = (price != null && t.qty) ? (price - t.entry) * t.qty : null;
+  var m = tradeMoney(t);
+  var pl = m.now;
 
   // Position on the stop..target rail, in physical left-to-right space.
   var lo = t.stop, hi = t.target || (t.entry + risk * TRADE_RR);
@@ -1706,6 +1729,12 @@ function tradeCardHtml(t) {
 
   if (EDITING === t.id) return tradeEditHtml(t);
 
+  // A minus sign rather than a hyphen, so a loss reads as a number and not as
+  // a stray dash next to the currency symbol.
+  var dollars = function (v) {
+    return v == null ? '—' : (v > 0 ? '+' : v < 0 ? '−' : '') + money(Math.abs(v));
+  };
+
   var moves = stopMoves(t);
   var movesHtml = moves.length
     ? '<div class="tr-moves">' + moves.map(function (m) {
@@ -1720,15 +1749,15 @@ function tradeCardHtml(t) {
       '<button class="tr-sym" onclick="analyze(\'' + esc(t.s) + '\')">' +
         esc(t.s) + '</button>' +
       (t.tag ? '<span class="tr-tag">' + esc(t.tag) + '</span>' : '') +
-      '<span class="tr-r ' + cls(r) + '">' +
-        (r == null ? '—' : (r > 0 ? '+' : '') + num(r, 2) + 'R') + '</span>' +
+      '<span class="tr-r ' + cls(pl) + '">' + dollars(pl) + '</span>' +
       '<button class="tr-x" onclick="editTrade(' + t.id +
         ')" aria-label="ערוך">✎</button>' +
     '</div>' +
     '<div class="tr-now">' +
       '<span class="pr">' + (price == null ? '…' : money(price)) + '</span>' +
-      (pl != null ? '<span class="pl ' + cls(pl) + '">' +
-        (pl > 0 ? '+' : '') + money(pl) + '</span>' : '') +
+      (m.perShare
+        ? '<span class="pl" style="color:var(--muted)">סכומים למניה — ' +
+          'הוסף כמות</span>' : '') +
     '</div>' +
     '<div class="rail">' +
       '<i class="rail-fill" style="width:' + (pos == null ? 0 : pos) + '%"></i>' +
@@ -1742,8 +1771,18 @@ function tradeCardHtml(t) {
         (toTgt != null ? ' · +' + num(toTgt, 1) + '%' : '') : 'ללא יעד') +
       '</span>' +
     '</div>' +
+    '<div class="mny">' +
+      '<div class="mny-c"><span class="mk">כעת</span>' +
+        '<span class="mv ' + cls(pl) + '">' + dollars(pl) + '</span></div>' +
+      '<div class="mny-c"><span class="mk">אם ייעצר</span>' +
+        '<span class="mv ' + cls(m.ifStopped) + '">' +
+        dollars(m.ifStopped) + '</span></div>' +
+      '<div class="mny-c"><span class="mk">אם יגיע ליעד</span>' +
+        '<span class="mv ' + cls(m.ifTarget) + '">' +
+        dollars(m.ifTarget) + '</span></div>' +
+    '</div>' +
     '<div class="tr-meta">כניסה ' + money(t.entry) +
-      (t.qty ? ' · ' + t.qty + ' מניות · סיכון ' + money(risk * t.qty) : '') +
+      (t.qty ? ' · ' + t.qty + ' מניות' : '') +
       ' · ' + esc(t.opened) +
       (t.stop >= t.entry ? ' · <b class="safe">מוגנת</b>' : '') + '</div>' +
     (t.note ? '<div class="tr-note">' + esc(t.note) + '</div>' : '') +
@@ -1855,9 +1894,9 @@ function paintTrades() {
     var pctOfAcct = (cfg.acct && risk.money)
       ? ' · ' + num((risk.money / cfg.acct) * 100, 1) + '% מהתיק' : '';
     riskHtml = '<div class="expo">' +
-      '<span class="ex-k">סיכון פתוח</span>' +
-      '<span class="ex-v">' + (risk.sized ? money(risk.money) : '—') +
-        (risk.sized && risk.r ? ' · ' + num(risk.r, 2) + 'R' : '') + '</span>' +
+      '<span class="ex-k">אם כל הסטופים ייפגעו</span>' +
+      '<span class="ex-v">' + (risk.sized ? '−' + money(risk.money) : '—') +
+        '</span>' +
       '<span class="ex-n">' +
         (risk.protected ? risk.protected + ' מוגנות' : '') +
         (risk.sized < open.length
@@ -1931,9 +1970,12 @@ function renderJournal() {
   var wins = rs.filter(function (v) { return v > 0; }).length;
   var total = rs.reduce(function (a, v) { return a + v; }, 0);
   if (stat) {
+    var netMoney = done.reduce(function (a, t) {
+      var v = tradeResult(t); return a + (v == null ? 0 : v);
+    }, 0);
     stat.textContent = done.length + ' · ' +
       Math.round((wins / rs.length) * 100) + '% מוצלחות · ' +
-      (total > 0 ? '+' : '') + num(total, 1) + 'R';
+      (netMoney > 0 ? '+' : netMoney < 0 ? '−' : '') + money(Math.abs(netMoney));
   }
   /* Per-setup expectancy. This is the number that says which setup is
      actually paying, and it only exists because trades carry a tag. */
@@ -1948,29 +1990,44 @@ function renderJournal() {
     var bv = byTag[b].reduce(function (x, y) { return x + y; }, 0) / byTag[b].length;
     return bv - av;
   });
+  var moneyByTag = {};
+  done.forEach(function (t) {
+    if (!t.tag) return;
+    var v = tradeResult(t);
+    if (v == null) return;
+    moneyByTag[t.tag] = (moneyByTag[t.tag] || 0) + v;
+  });
+  // Ordered by money made, since that is the column being read.
+  tags.sort(function (a, b) {
+    return (moneyByTag[b] || 0) - (moneyByTag[a] || 0);
+  });
+
   var tagHtml = tags.length ? '<div class="tagstats">' + tags.map(function (k) {
     var rs2 = byTag[k];
-    var avg = rs2.reduce(function (a, v) { return a + v; }, 0) / rs2.length;
     var w = rs2.filter(function (v) { return v > 0; }).length;
+    var sum = moneyByTag[k] || 0;
     return '<div class="tstat">' +
       '<span class="tk-name">' + esc(k) + '</span>' +
       '<span class="tk-n">' + rs2.length + ' עסקאות · ' +
-        Math.round((w / rs2.length) * 100) + '%</span>' +
-      '<span class="tk-r ' + cls(avg) + '">' + (avg > 0 ? '+' : '') +
-        num(avg, 2) + 'R</span>' +
+        Math.round((w / rs2.length) * 100) + '% מוצלחות</span>' +
+      '<span class="tk-r ' + cls(sum) + '">' +
+        (sum > 0 ? '+' : sum < 0 ? '−' : '') + money(Math.abs(sum)) + '</span>' +
       '</div>';
-  }).join('') + '<div class="score-note" style="margin-top:7px">תוחלת ממוצעת ' +
-    'לעסקה, לפי סוג סטאפ. אחרי כמה עשרות עסקאות זה מראה מה באמת עובד לך.' +
-    '</div></div>' : '';
+  }).join('') + '<div class="score-note" style="margin-top:7px">סך הרווח או ' +
+    'ההפסד לפי סוג סטאפ. אחרי כמה עשרות עסקאות זה מראה איזה סטאפ באמת ' +
+    'מרוויח לך כסף.</div></div>' : '';
 
   box.innerHTML = tagHtml + done.slice(0, 30).map(function (t) {
     var r = tradeR(t, t.exit);
+    var got = tradeResult(t);
     return '<div class="jrow">' +
       '<span class="sym">' + esc(t.s) + '</span>' +
       '<span class="dt">' + (t.tag ? esc(t.tag) + ' · ' : '') +
         esc(t.closed || t.opened) + '</span>' +
-      '<span class="r ' + cls(r) + '">' +
-        (r == null ? '—' : (r > 0 ? '+' : '') + num(r, 2) + 'R') + '</span>' +
+      '<span class="r ' + cls(got) + '">' +
+        (got == null ? '—'
+          : (got > 0 ? '+' : got < 0 ? '−' : '') + money(Math.abs(got))) +
+        '</span>' +
       '<button class="tr-x" onclick="deleteTrade(' + t.id +
         ')" aria-label="מחק">✕</button>' +
       '</div>';

@@ -969,3 +969,25 @@ a.btn { display: block; text-decoration: none; }
 .cmp-x {
   font-size: .7rem; color: var(--muted); padding: 0 2px; line-height: 1;
 }
+
+/* The three questions a trade answers, all in money and all measured the
+   same way: what this trade will have made or lost when it is over. */
+.mny {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 8px; margin-top: 11px;
+}
+.mny-c {
+  background: var(--surface); border-radius: var(--r-sm);
+  padding: 8px 6px; text-align: center;
+}
+.mk {
+  display: block; font-size: .64rem; color: var(--muted);
+  font-weight: 600; white-space: nowrap;
+}
+.mv {
+  display: block; margin-top: 3px;
+  font-size: .86rem; font-weight: 800;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.mv.up { color: var(--gain); }
+.mv.down { color: var(--loss); }
