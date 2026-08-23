@@ -79,6 +79,18 @@
       </div>
 
       <div class="card">
+        <div class="card-h"><span>השוואה</span>
+          <span class="sub">עד 3 מניות</span></div>
+        <div class="frow">
+          <input id="c-sym" placeholder="הוסף סימבול" autocomplete="off"
+                 autocapitalize="characters">
+          <button class="btn ghost" style="max-width:96px"
+                  onclick="addCompare()">הוסף</button>
+        </div>
+        <div id="compare"></div>
+      </div>
+
+      <div class="card">
         <div class="card-h"><span>ניתוח מניה</span></div>
         <div class="search-wrap">
           <input class="search" id="q" type="search" autocomplete="off"
@@ -96,6 +108,18 @@
         <div>
           <div class="kicker">מעקב</div>
           <h1>התראות וסורק</h1>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span>רשימת מעקב</span>
+          <span class="sub" id="wlCount"></span></div>
+        <div id="watchlist"><div class="msg">אין מניות במעקב.</div></div>
+        <div class="frow" style="margin-top:12px">
+          <input id="w-sym" placeholder="סימבול" autocomplete="off"
+                 autocapitalize="characters">
+          <button class="btn ghost" style="max-width:96px"
+                  onclick="addWatch()">הוסף</button>
         </div>
       </div>
 

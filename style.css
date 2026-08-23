@@ -907,3 +907,65 @@ a.btn { display: block; text-decoration: none; }
 }
 .tk-r.up { color: var(--gain); }
 .tk-r.down { color: var(--loss); }
+
+/* ------------------------------------------------------------ watchlist */
+.wl {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto;
+  align-items: center; gap: 10px;
+  padding: 10px 12px; border-radius: var(--r-md);
+  background: var(--surface-2); margin-bottom: 8px;
+}
+.wl:last-child { margin-bottom: 0; }
+.wl-id { min-width: 0; text-align: start; padding: 0; }
+.wl-id > span { display: block; }
+.wl .sym { font-weight: 800; font-size: .88rem; }
+.wl .nm {
+  font-size: .7rem; color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.wl-px { text-align: end; white-space: nowrap; }
+.wl-px > span { display: block; }
+.wl .pr {
+  font-weight: 800; font-size: .85rem;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.wl .d {
+  font-size: .7rem; font-weight: 700;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.wl .d.up { color: var(--gain); }
+.wl .d.down { color: var(--loss); }
+.wl-sc {
+  font-size: .9rem; font-weight: 800; min-width: 22px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The star in the analysis sheet: outline until it is being followed. */
+.icon-btn.star svg { fill: none; }
+.icon-btn.star.on { color: var(--watch); }
+.icon-btn.star.on svg { fill: currentColor; }
+
+/* -------------------------------------------------------------- compare */
+.cmp { margin-top: 12px; --cmp-n: 2; }
+.cmp-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) repeat(var(--cmp-n), minmax(0, 1fr));
+  align-items: center; gap: 8px;
+  padding: 7px 0; border-bottom: 1px solid var(--line);
+}
+.cmp-row:last-child { border-bottom: none; }
+.cmp-row.head { border-bottom: 1px solid var(--border); padding-bottom: 9px; }
+.cmp-lb { font-size: .74rem; color: var(--ink-2); font-weight: 600; }
+.cmp-c {
+  font-size: .8rem; font-weight: 700; text-align: center;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+/* Only where "better" has a direction - RSI and price have none. */
+.cmp-c.win { color: var(--primary-500); font-weight: 800; }
+.cmp-row.head .cmp-c {
+  display: flex; align-items: center; justify-content: center; gap: 3px;
+}
+.cmp-sym { font-size: .86rem; font-weight: 800; padding: 0; }
+.cmp-x {
+  font-size: .7rem; color: var(--muted); padding: 0 2px; line-height: 1;
+}

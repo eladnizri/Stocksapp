@@ -49,7 +49,9 @@ var LS = {
      older remote list on the next open and lose the change. */
   dirty: 'sa_dirty',
   trades: 'sa_trades',
-  risk: 'sa_risk'
+  risk: 'sa_risk',
+  watch: 'sa_watch',
+  compare: 'sa_compare'
 };
 
 var store = {
@@ -196,6 +198,7 @@ function loadSnapshot() {
 function useSnapshot(d, isCache) {
   SNAP = d;
   SNAP_BY_SYM = {};
+  SECTOR_MED = null;      // recomputed against the new rows on next use
   for (var i = 0; i < d.rows.length; i++) SNAP_BY_SYM[d.rows[i].s] = d.rows[i];
   renderDataStatus(null, isCache);
   var uc = $('#screenCount');
@@ -295,12 +298,14 @@ function goTab(name, opts) {
     if (!(opts && opts.noEnter)) playEnter($('#p-' + name));
   }
 
-  if (name === 'watch') { renderAlerts(); checkAlerts(false); renderFilters(); }
+  if (name === 'watch') {
+    renderWatchlist(); renderAlerts(); checkAlerts(false); renderFilters();
+  }
   if (name === 'trades') { renderTrades(); }
   if (name === 'home') { renderHome(); }
   if (name === 'market') {
     renderBreadth(); renderSectors();
-    renderChanges(); renderEarningsSoon();
+    renderChanges(); renderEarningsSoon(); renderCompare();
   }
 }
 
@@ -407,6 +412,209 @@ function pushRecent(sym) {
   store.set(LS.recent, rec.slice(0, 10));
 }
 
+/* ============================================================ watchlist ==
+ * Symbols you are following but have neither an alert nor a position on.
+ * Deliberately separate from both: an alert is a level you want to be told
+ * about, a trade is money at stake, and this is neither. */
+function watchlist() { return store.get(LS.watch, []); }
+
+function addWatch(sym) {
+  var el = $('#w-sym');
+  sym = (sym || (el && el.value) || '').trim().toUpperCase();
+  if (!sym) return;
+  var list = watchlist();
+  if (list.indexOf(sym) < 0) list.unshift(sym);
+  store.set(LS.watch, list.slice(0, 40));
+  if (el) el.value = '';
+  renderWatchlist();
+  checkAlerts(false);
+  haptic(10);
+}
+
+function removeWatch(sym) {
+  store.set(LS.watch, watchlist().filter(function (s) { return s !== sym; }));
+  renderWatchlist();
+}
+
+function inWatchlist(sym) { return watchlist().indexOf(sym) >= 0; }
+
+function toggleWatch(sym) {
+  if (inWatchlist(sym)) removeWatch(sym); else addWatch(sym);
+  if (CUR === sym) analyze(sym);      // refresh the sheet's star
+}
+
+function renderWatchlist() {
+  var box = $('#watchlist');
+  if (!box) return;
+  var list = watchlist();
+  var c = $('#wlCount');
+  if (c) c.textContent = list.length ? list.length + ' מניות' : '';
+  if (!list.length) {
+    box.innerHTML = '<div class="msg">אין מניות במעקב. הוסף כאן, או מכוכב ' +
+      'בראש הניתוח של כל מניה.</div>';
+    return;
+  }
+  box.innerHTML = list.map(function (sym) {
+    var row = SNAP_BY_SYM[sym];
+    var t = (row && row.t) || {};
+    var price = ALERT_PRICES[sym] != null ? ALERT_PRICES[sym] : t.price;
+    var sc = row && row.sc ? row.sc.total : null;
+    return '<div class="wl">' +
+      '<button class="wl-id" onclick="analyze(\'' + esc(sym) + '\')">' +
+        '<span class="sym">' + esc(sym) + '</span>' +
+        '<span class="nm">' + esc((row && row.n) || '') + '</span>' +
+      '</button>' +
+      '<span class="wl-px">' +
+        '<span class="pr">' + (price == null ? '…' : money(price)) + '</span>' +
+        '<span class="d ' + cls(t.chg1d) + '">' + pct(t.chg1d, 1) + '</span>' +
+      '</span>' +
+      '<span class="wl-sc" style="color:' + scoreColor(sc) + '">' +
+        (sc == null ? '—' : sc) + '</span>' +
+      '<button class="tr-x" onclick="removeWatch(\'' + esc(sym) +
+        '\')" aria-label="הסר">✕</button>' +
+      '</div>';
+  }).join('');
+}
+
+/* ============================================================== compare ==
+ * The snapshot already holds every number here; the only thing missing was
+ * seeing two of them at once. */
+var CMP_ROWS = [
+  ['ציון', function (r) { return r.sc && r.sc.total; }, 0, 'score'],
+  ['מחיר', function (r) { return r.t && r.t.price; }, 2, 'money'],
+  ['שווי שוק', function (r) { return r.mcap; }, 0, 'big'],
+  ['מכפיל רווח', function (r) { return r.pe; }, 1, 'hi-lo'],
+  ['מכפיל מכירות', function (r) { return r.ps; }, 1, 'hi-lo'],
+  ['צמיחת הכנסות %', function (r) { return r.f && r.f.revGrowth; }, 1, 'lo-hi'],
+  ['מרג׳ין נקי %', function (r) { return r.f && r.f.netMargin; }, 1, 'lo-hi'],
+  ['תשואה על ההון %', function (r) { return r.f && r.f.roe; }, 1, 'lo-hi'],
+  ['חוב להון %', function (r) { return r.f && r.f.debtToEquity; }, 0, 'hi-lo'],
+  ['RSI', function (r) { return r.t && r.t.rsi; }, 0, 'none'],
+  ['מעל ממוצע 200 %', function (r) { return r.t && r.t.vma200; }, 1, 'lo-hi'],
+  ['תשואה 12ח %', function (r) { return r.t && r.t.chg12m; }, 1, 'lo-hi'],
+  ['תנודתיות ATR %', function (r) { return r.t && r.t.atrPct; }, 1, 'hi-lo']
+];
+
+function compareList() { return store.get(LS.compare, []); }
+
+function addCompare(sym) {
+  var el = $('#c-sym');
+  sym = (sym || (el && el.value) || '').trim().toUpperCase();
+  if (!sym) return;
+  var list = compareList();
+  if (list.indexOf(sym) < 0) list.push(sym);
+  store.set(LS.compare, list.slice(0, 3));
+  if (el) el.value = '';
+  renderCompare();
+}
+
+function removeCompare(sym) {
+  store.set(LS.compare, compareList().filter(function (s) { return s !== sym; }));
+  renderCompare();
+}
+
+function renderCompare() {
+  var box = $('#compare');
+  if (!box) return;
+  var syms = compareList().filter(function (s) { return SNAP_BY_SYM[s]; });
+  if (!syms.length) {
+    box.innerHTML = '<div class="msg" style="margin-top:10px">הוסף שתיים או ' +
+      'שלוש מניות כדי לראות אותן זו מול זו.</div>';
+    return;
+  }
+  var rows = syms.map(function (s) { return SNAP_BY_SYM[s]; });
+
+  var head = '<div class="cmp-row head">' +
+    '<span class="cmp-lb"></span>' + syms.map(function (s) {
+      return '<span class="cmp-c"><button class="cmp-sym" onclick="analyze(\'' +
+        esc(s) + '\')">' + esc(s) + '</button>' +
+        '<button class="cmp-x" onclick="removeCompare(\'' + esc(s) +
+        '\')" aria-label="הסר">✕</button></span>';
+    }).join('') + '</div>';
+
+  var body = CMP_ROWS.map(function (def) {
+    var vals = rows.map(function (r) {
+      var v = def[1](r);
+      return (v == null || isNaN(v)) ? null : v;
+    });
+    var have = vals.filter(function (v) { return v != null; });
+    // Highlight the better side only where "better" has a direction.
+    var best = null;
+    if (have.length > 1 && def[3] === 'lo-hi') best = Math.max.apply(null, have);
+    if (have.length > 1 && def[3] === 'hi-lo') best = Math.min.apply(null, have);
+    if (have.length > 1 && def[3] === 'score') best = Math.max.apply(null, have);
+
+    return '<div class="cmp-row">' +
+      '<span class="cmp-lb">' + def[0] + '</span>' +
+      vals.map(function (v) {
+        var txt = v == null ? '—'
+          : def[3] === 'big' ? big(v)
+          : def[3] === 'money' ? money(v)
+          : num(v, def[2]);
+        var win = best != null && v === best;
+        return '<span class="cmp-c' + (win ? ' win' : '') + '">' + txt + '</span>';
+      }).join('') + '</div>';
+  }).join('');
+
+  box.innerHTML = '<div class="cmp" style="--cmp-n:' + syms.length + '">' +
+    head + body + '</div>';
+}
+
+/* --------------------------------------------------- relative strength -- */
+/* Median return per sector, from the snapshot. Cached because the analysis
+   sheet asks for it on every render and it is a full pass over 500 rows. */
+var SECTOR_MED = null;
+
+function sectorMedians() {
+  if (SECTOR_MED) return SECTOR_MED;
+  SECTOR_MED = {};
+  if (!SNAP) return SECTOR_MED;
+  var by = {};
+  SNAP.rows.forEach(function (r) {
+    if (!r.sec || !r.t) return;
+    var b = (by[r.sec] = by[r.sec] || { m: [], y: [] });
+    if (r.t.chg1m != null) b.m.push(r.t.chg1m);
+    if (r.t.chg12m != null) b.y.push(r.t.chg12m);
+  });
+  var med = function (xs) {
+    if (!xs.length) return null;
+    var a = xs.slice().sort(function (x, y) { return x - y; });
+    var i = Math.floor(a.length / 2);
+    return a.length % 2 ? a[i] : (a[i - 1] + a[i]) / 2;
+  };
+  Object.keys(by).forEach(function (k) {
+    SECTOR_MED[k] = { m: med(by[k].m), y: med(by[k].y), n: by[k].m.length };
+  });
+  return SECTOR_MED;
+}
+
+/* A stock up 8% in a sector up 10% is lagging, not winning. */
+function renderRelStrength(row) {
+  if (!row || !row.sec || !row.t) return '';
+  var med = sectorMedians()[row.sec];
+  if (!med || med.n < 5) return '';
+
+  var line = function (label, v, m) {
+    if (v == null || m == null) return '';
+    var d = v - m;
+    return '<div class="mrow" style="grid-template-columns:1fr auto">' +
+      '<span class="lb">' + label + '</span>' +
+      '<span class="vl ' + cls(d) + '">' + (d > 0 ? '+' : '') + num(d, 1) +
+      '%</span></div>';
+  };
+  var body = line('חודש מול הסקטור', row.t.chg1m, med.m) +
+             line('שנה מול הסקטור', row.t.chg12m, med.y);
+  if (!body) return '';
+
+  return '<div class="card">' +
+    '<div class="card-h"><span>חוזק יחסי</span>' +
+      '<span class="sub">' + esc(row.sec) + ' · ' + med.n + ' מניות</span></div>' +
+    '<div class="mtable">' + body + '</div>' +
+    '<div class="score-note" style="margin-top:9px">כמה המניה מעל או מתחת ' +
+      'לחציון הסקטור שלה. עלייה של 8% בסקטור שעלה 10% היא פיגור, לא הצלחה.' +
+      '</div></div>';
+}
+
 /* -------------------------------------------------------- analysis page */
 var CUR = null;
 /* True only for the first paint of a symbol. The live quote arriving a second
@@ -492,6 +700,11 @@ function renderAnalysis(sym, row, quote, targets) {
             ((row && row.i && row.i.length) ? row.i.map(idxLabel).join(' · ')
                                             : 'מחוץ למדדים הנסרקים') + '</div>' +
         '</div>' +
+        '<button class="icon-btn star' + (inWatchlist(sym) ? ' on' : '') +
+          '" onclick="toggleWatch(\'' + esc(sym) + '\')" aria-label="מעקב">' +
+          '<svg viewBox="0 0 24 24"><path d="M12 3l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5' +
+          'L12 17.8 6.2 20.9l1.1-6.5L2.6 9.8l6.5-.9z"/></svg>' +
+        '</button>' +
         '<button class="icon-btn" onclick="closeSheet()" aria-label="סגור">' +
           '<svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>' +
         '</button>' +
@@ -535,6 +748,9 @@ function renderAnalysis(sym, row, quote, targets) {
 
   /* ---- technicals ---- */
   html += renderTechnicals(t, price);
+
+  /* ---- relative strength vs the sector ---- */
+  html += renderRelStrength(row);
 
   /* ---- analyst forecast ---- */
   html += renderForecast(tg, price);
@@ -1030,6 +1246,7 @@ function watchedSymbols() {
   var syms = {};
   store.get(LS.alerts, []).forEach(function (a) { syms[a.s] = 1; });
   openTrades().forEach(function (t) { syms[t.s] = 1; });
+  watchlist().forEach(function (s) { syms[s] = 1; });
   return Object.keys(syms);
 }
 
@@ -1055,8 +1272,9 @@ function checkAlerts(force) {
         ALERT_PRICES[sym] = q.price;
         PRICE_AT[sym] = Date.now();
         renderAlerts();
-        // The same price drives the trade cards' R and rail position.
+        // The same price drives the trade cards and the watchlist rows.
         paintTrades();
+        renderWatchlist();
       }
     }).catch(function () {});
   });
@@ -3037,6 +3255,8 @@ function boot() {
     // Needs the snapshot: an open trade falls back to the snapshot price
     // until a live quote lands, and the guard reads ATR and earnings from it.
     renderHome();
+    renderWatchlist();
+    renderCompare();
     checkAlerts(false);
   });
   // Pull, not push: pushing here let a copy holding an older list overwrite
