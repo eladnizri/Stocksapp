@@ -845,3 +845,10 @@ a.btn { display: block; text-decoration: none; }
 .tab.on svg { transform: translateY(-1px) scale(1.1); }
 .tab span { font-size: .66rem; font-weight: 600; transition: opacity .2s; }
 .tab.on { color: var(--primary-500); }
+
+/* An alert owned by a trade: not deletable here, since closing the trade is
+   what removes it. */
+.alert .badge.own {
+  background: var(--surface); color: var(--ink-2);
+  border: 1px solid var(--border);
+}

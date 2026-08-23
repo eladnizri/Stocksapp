@@ -949,6 +949,12 @@ function addAlert() {
     note.textContent = 'צריך סימבול ומחיר';
     return;
   }
+  // The same level twice would just fire twice.
+  var dup = store.get(LS.alerts, []).some(function (a) {
+    return a.s === sym && a.d === dir && Math.abs(a.p - price) < 1e-9;
+  });
+  if (dup) { note.textContent = 'ההתראה הזו כבר קיימת'; return; }
+
   saveAlert(sym, price, dir);
   $('#a-sym').value = '';
   $('#a-price').value = '';
@@ -965,6 +971,11 @@ function removeAlert(i) {
 /* Last known price per alerted symbol. Seeded from the snapshot so a row
    shows something immediately, then refreshed live. */
 var ALERT_PRICES = {};
+/* When each of those was fetched. Without this a price was fetched once and
+   then never again - every later check saw a cached value and skipped - so an
+   open trade's price, R and rail froze at whatever loaded first. */
+var PRICE_AT = {};
+var PRICE_TTL = 60000;
 
 function seedAlertPrices(list) {
   list.forEach(function (a) {
@@ -987,44 +998,91 @@ function renderAlerts() {
     var now = ALERT_PRICES[a.s];
     var hit = now != null &&
       ((a.d === 'above' && now >= a.p) || (a.d === 'below' && now <= a.p));
+    /* An alert belonging to a trade is that trade's stop or target. Deleting
+       it here used to remove the protection silently and nothing put it back,
+       so it is shown as owned and is removed by closing the trade instead. */
+    var owned = !!a.tid;
+    var kind = a.kind === 'stop' ? 'סטופ' : a.kind === 'target' ? 'יעד' : '';
     return '<div class="alert ' + (hit ? 'on' : '') + '">' +
       '<div class="a-main">' +
         '<div class="a-top">' +
           '<span class="sym">' + esc(a.s) + '</span>' +
+          (owned ? '<span class="badge own">' + kind + ' עסקה</span>' : '') +
           (hit ? '<span class="badge">הופעלה</span>' : '') +
           '<span class="pr">' + (now == null ? '…' : money(now)) + '</span>' +
         '</div>' +
         '<div class="cond">' + (a.d === 'above' ? 'מעל' : 'מתחת ל־') + ' ' +
           money(a.p) + '</div>' +
       '</div>' +
-      '<button class="x" onclick="removeAlert(' + i + ')" aria-label="מחק">✕</button>' +
+      (owned
+        ? '<button class="x" onclick="goTab(\'trades\')" ' +
+          'aria-label="לעסקאות">›</button>'
+        : '<button class="x" onclick="removeAlert(' + i +
+          ')" aria-label="מחק">✕</button>') +
       '</div>';
   }).join('');
   $('#alertCount').textContent = list.length + ' פעילות';
 }
 
-function checkAlerts(force) {
-  var list = store.get(LS.alerts, []);
-  if (!list.length) return;
+/* Symbols worth a live price: everything alerted, plus every open trade even
+   if its alerts were removed by hand. */
+function watchedSymbols() {
   var syms = {};
-  list.forEach(function (a) { syms[a.s] = 1; });
+  store.get(LS.alerts, []).forEach(function (a) { syms[a.s] = 1; });
+  openTrades().forEach(function (t) { syms[t.s] = 1; });
+  return Object.keys(syms);
+}
 
-  Object.keys(syms).forEach(function (sym) {
-    if (!force && ALERT_PRICES[sym] != null) return;
+function checkAlerts(force) {
+  var syms = watchedSymbols();
+  if (!syms.length) return;
+  var now = Date.now();
+
+  syms.forEach(function (sym) {
+    // A cached price is only good for PRICE_TTL. Skipping on "we have one"
+    // alone is what froze the trade cards.
+    var fresh = PRICE_AT[sym] && (now - PRICE_AT[sym]) < PRICE_TTL;
+    if (!force && ALERT_PRICES[sym] != null && fresh) return;
+
     var snap = SNAP_BY_SYM[sym];
     if (snap && snap.t && snap.t.price != null && ALERT_PRICES[sym] == null) {
-      ALERT_PRICES[sym] = snap.t.price;
+      ALERT_PRICES[sym] = snap.t.price;   // shown until the live one lands
       renderAlerts();
+      paintTrades();
     }
     yahooQuote(sym).then(function (q) {
       if (q && q.price != null) {
         ALERT_PRICES[sym] = q.price;
+        PRICE_AT[sym] = Date.now();
         renderAlerts();
         // The same price drives the trade cards' R and rail position.
         paintTrades();
       }
     }).catch(function () {});
   });
+}
+
+/* Keeps the open trades moving while the app is on screen. Paused when it is
+   not, so a backgrounded tab is not quietly burning requests. */
+function startPricePolling() {
+  setInterval(function () {
+    if (document.hidden) return;
+    if (!openTrades().length && !store.get(LS.alerts, []).length) return;
+    checkAlerts(false);
+  }, PRICE_TTL);
+
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) checkAlerts(false);
+  });
+}
+
+/* The freshest of the watched prices, for the "updated HH:MM" stamp. */
+function lastPriceAt() {
+  var best = 0;
+  watchedSymbols().forEach(function (s) {
+    if (PRICE_AT[s] && PRICE_AT[s] > best) best = PRICE_AT[s];
+  });
+  return best || null;
 }
 
 /* ================================================================ trades ==
@@ -1377,8 +1435,15 @@ function paintTrades() {
       '<button class="chip" style="margin-top:8px" onclick="goTab(\'trades\')">' +
       'פתח סטאפ</button></div>';
   }
+  // The stamp matters here: a frozen price is invisible without it, and this
+  // card is the one you would act on.
+  var at = lastPriceAt();
+  var stamp = (open.length && at)
+    ? ' · ' + new Date(at).toLocaleTimeString('he-IL',
+        { hour: '2-digit', minute: '2-digit' })
+    : '';
   var hc = $('#homeTradeCount');
-  if (hc) hc.textContent = open.length ? open.length + ' פתוחות' : '';
+  if (hc) hc.textContent = open.length ? open.length + ' פתוחות' + stamp : '';
 
   var tb = $('#tradesList');
   if (tb) {
@@ -1387,7 +1452,7 @@ function paintTrades() {
       'הסטופ והיעד יוצעו לפי ATR.</div>';
   }
   var tc = $('#tradeCount');
-  if (tc) tc.textContent = open.length ? open.length + ' פתוחות' : '';
+  if (tc) tc.textContent = open.length ? open.length + ' פתוחות' + stamp : '';
 }
 
 /* The home screen: indices and the trades you are in, nothing else. */
@@ -2706,6 +2771,7 @@ function boot() {
   $('#greet').textContent = greet();
   enableSwipe();
   enableSheetSwipe();
+  startPricePolling();
   goTab('home', { silent: true });
   playEnter($('#p-home'));
   renderFilters();
