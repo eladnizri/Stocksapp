@@ -1,0 +1,78 @@
+name: Check price alerts
+
+# The app can only check alerts while it is open, because the alerts live in
+# localStorage on the phone. This runs the same checks on a schedule against
+# data/alerts.json, which is what lets an alert arrive when the app is closed.
+#
+# Times are UTC. US market hours are 13:30-20:00 UTC in summer and
+# 14:30-21:00 in winter, so the window below covers both without having to be
+# edited twice a year.
+on:
+  schedule:
+    - cron: '*/15 13-21 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Check and report without sending or saving'
+        type: boolean
+        default: false
+      probe:
+        description: 'Health-check one symbol (e.g. AAPL) and stop'
+        type: string
+        default: ''
+
+permissions:
+  contents: write
+
+# A run that overlaps the previous one would read stale state and could send
+# the same alert twice.
+concurrency:
+  group: alerts
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requests
+        run: pip install --quiet requests
+
+      - name: Check alerts
+        id: check
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_HOST: ${{ vars.NTFY_HOST }}
+        run: |
+          python scripts/check_alerts.py \
+            ${{ inputs.probe && format('--probe {0}', inputs.probe) || '' }} \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Commit fired state
+        if: steps.check.outputs.changed == 'true' && !inputs.dry_run
+        run: |
+          git config user.name  'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add data/alert_state.json
+          if git diff --staged --quiet; then
+            echo "nothing to commit"
+            exit 0
+          fi
+          # [skip ci] keeps this off the stamp workflow's back.
+          git commit -m "Update alert state [skip ci]"
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "pushed on attempt $attempt"
+              exit 0
+            fi
+            git pull --rebase origin main || exit 1
+          done
+          echo "could not push after 3 attempts"
+          exit 1

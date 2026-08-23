@@ -1,0 +1,4 @@
+{
+  "_comment": "Alerts checked by .github/workflows/alerts.yml. Edit here or paste from the app (Settings -> alerts sync). d is 'above' or 'below'; p is the price in dollars.",
+  "alerts": []
+}

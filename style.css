@@ -665,6 +665,21 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 
+/* The alerts payload, shown for copying. LTR and monospaced because it is
+   JSON, and scrollable because a long list must not widen the sheet. */
+.sync-box {
+  direction: ltr; text-align: left;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .72rem; line-height: 1.5; color: var(--ink-2);
+  background: var(--surface-2); border-radius: var(--r-sm);
+  padding: 11px 12px; max-height: 190px;
+  overflow: auto; white-space: pre;
+  -webkit-user-select: text; user-select: text;
+}
+.sync-box::-webkit-scrollbar { display: none; }
+/* An <a> styled as .btn needs the padding box a <button> gets for free. */
+a.btn { display: block; text-decoration: none; }
+
 /* ---------------------------------------------------------------- states */
 .msg {
   font-size: .84rem; color: var(--ink-2); line-height: 1.6;

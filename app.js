@@ -1629,6 +1629,7 @@ function openSettings() {
       '<div class="score-note" style="margin-top:10px">המאגר נבנה כל לילה ' +
         'מדוחות שהוגשו ל־SEC. המחירים החיים נמשכים מהמכשיר.</div>' +
     '</div>' +
+    renderAlertsSync() +
     '<div class="card">' +
       '<div class="card-h"><span>פעולות</span></div>' +
       '<button class="btn" onclick="refreshSnapshot()">רענן את המאגר</button>' +
@@ -1643,6 +1644,81 @@ function openSettings() {
   // Clears the .quiet flag a previous analysis render may have left behind,
   // which would otherwise suppress this sheet's card stagger.
   runSheetIntro(true);
+}
+
+/* Getting the alerts off the phone.
+ *
+ * Alerts live in localStorage, so the scheduled checker on the runner cannot
+ * see them - it reads data/alerts.json in the repo instead. There is no server
+ * to sync through and no way to hold a write token in a public page, so the
+ * handoff is a copy and a paste. Only needed when the alert list changes. */
+var REPO_EDIT_URL =
+  'https://github.com/eladnizri/Stocksapp/edit/main/data/alerts.json';
+
+function alertsSyncJson() {
+  var list = store.get(LS.alerts, []).map(function (a) {
+    return { s: a.s, d: a.d, p: a.p };
+  });
+  return JSON.stringify({ alerts: list }, null, 2);
+}
+
+function copyAlertsJson() {
+  var txt = alertsSyncJson();
+  var note = $('#syncNote');
+  var done = function (okMsg) {
+    if (note) {
+      note.textContent = okMsg;
+      note.style.color = 'var(--primary-500)';
+    }
+    haptic(12);
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(txt).then(function () {
+      done('הועתק. עכשיו הדבק בקובץ ב־GitHub.');
+    }).catch(function () { selectAlertsJson(); });
+  } else {
+    selectAlertsJson();
+  }
+}
+
+/* Clipboard access can be refused (an insecure context, or a browser that
+   simply says no). Selecting the text leaves the user one long-press from
+   copying it by hand rather than stranded. */
+function selectAlertsJson() {
+  var el = $('#syncBox');
+  var note = $('#syncNote');
+  if (!el) return;
+  try {
+    var r = document.createRange();
+    r.selectNodeContents(el);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+  } catch (e) {}
+  if (note) {
+    note.textContent = 'סומן — לחץ ארוך והעתק.';
+    note.style.color = 'var(--watch)';
+  }
+}
+
+function renderAlertsSync() {
+  var n = store.get(LS.alerts, []).length;
+  return '<div class="card">' +
+    '<div class="card-h"><span>סנכרון התראות</span>' +
+      '<span class="sub">' + n + ' מוגדרות</span></div>' +
+    '<div class="score-note" style="margin-bottom:10px">ההתראות נשמרות ' +
+      'במכשיר בלבד, ולכן נבדקות רק כשהאפליקציה פתוחה. כדי שיגיעו גם כשהיא ' +
+      'סגורה, העתק את הרשימה והדבק אותה בקובץ ' +
+      '<b>data/alerts.json</b> ב־GitHub. צריך לעשות זאת רק כשמשנים ' +
+      'את רשימת ההתראות.</div>' +
+    '<pre class="sync-box" id="syncBox">' + esc(alertsSyncJson()) + '</pre>' +
+    '<div class="frow" style="margin-top:11px">' +
+      '<button class="btn" onclick="copyAlertsJson()">העתק</button>' +
+      '<a class="btn ghost" href="' + REPO_EDIT_URL + '" target="_blank" ' +
+        'rel="noopener" style="text-align:center">פתח ב־GitHub</a>' +
+    '</div>' +
+    '<div class="score-note" id="syncNote" style="margin-top:8px"></div>' +
+    '</div>';
 }
 
 function refreshSnapshot() {
