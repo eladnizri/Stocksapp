@@ -33,10 +33,20 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 
-html, body { height: 100%; }
-body {
+/* The background lives on the root, not on body.
+   body is only as tall as the app shell, so anything past it - the home
+   indicator strip on an iPhone, an over-scroll bounce - was painting the
+   default white instead of the page. Painting the root covers the whole
+   canvas whatever the shell's height turns out to be. */
+html {
+  height: 100%;
   background: var(--bg);
   background-attachment: fixed;
+  background-color: #fdeee4;   /* the gradient's own last stop */
+}
+body {
+  min-height: 100%;
+  background: transparent;
   color: var(--ink);
   font-family: 'Rubik', system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
@@ -801,9 +811,13 @@ a.btn { display: block; text-decoration: none; }
 .tabbar {
   display: grid; grid-template-columns: repeat(4, 1fr);
   --tab-n: 4;
-  background: linear-gradient(180deg, rgba(240, 247, 242, .74), rgba(240, 247, 242, .96));
-  backdrop-filter: saturate(160%) blur(16px);
-  -webkit-backdrop-filter: saturate(160%) blur(16px);
+  /* Neutral white at low opacity rather than a mint tint: the page ends on a
+     warm peach here, and a near-opaque cool tint read as a white slab bolted
+     to the bottom. The blur is what makes the labels legible, so the colour
+     can stay light enough for the page to show through. */
+  background: linear-gradient(180deg, rgba(255, 255, 255, .34), rgba(255, 255, 255, .62));
+  backdrop-filter: saturate(150%) blur(18px);
+  -webkit-backdrop-filter: saturate(150%) blur(18px);
   border-top: 1px solid var(--line);
   padding-bottom: env(safe-area-inset-bottom);
   position: relative; z-index: 6;
