@@ -122,6 +122,69 @@
       </div>
     </section>
 
+    <!-- ============================================ trades ============= -->
+    <section class="page" id="p-trades">
+      <div class="head">
+        <div>
+          <div class="kicker">עסקאות</div>
+          <h1>סטאפים פתוחים</h1>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span>סטאפ חדש</span>
+          <span class="sub" id="tSugNote"></span></div>
+        <div class="frow">
+          <input id="t-sym" placeholder="סימבול" autocomplete="off"
+                 autocapitalize="characters" oninput="onTradeInput()">
+          <input id="t-entry" inputmode="decimal" placeholder="מחיר כניסה"
+                 oninput="onTradeInput()">
+        </div>
+        <div class="frow">
+          <input id="t-stop" inputmode="decimal" placeholder="סטופ"
+                 oninput="touchField(this)">
+          <input id="t-target" inputmode="decimal" placeholder="יעד"
+                 oninput="touchField(this)">
+        </div>
+        <div class="frow">
+          <input id="t-qty" inputmode="decimal" placeholder="כמות מניות">
+          <button class="btn ghost" style="max-width:124px;white-space:nowrap"
+                  onclick="suggestSize()">חשב כמות</button>
+        </div>
+        <div id="t-guard"></div>
+        <div class="frow" style="margin-top:2px">
+          <button class="btn" onclick="addTrade()">פתח עסקה</button>
+          <button class="btn ghost" style="max-width:86px"
+                  onclick="resetTradeForm()">נקה</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span>ניהול סיכון</span>
+          <span class="sub" id="riskNote"></span></div>
+        <div class="frow">
+          <input id="r-acct" inputmode="decimal" placeholder="גודל תיק $"
+                 oninput="saveRisk()">
+          <input id="r-pct" inputmode="decimal" placeholder="סיכון %"
+                 oninput="saveRisk()">
+        </div>
+        <div class="score-note">כמה אתה מוכן להפסיד בעסקה בודדת. מקובל
+          0.5%–2% מהתיק.</div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span>פתוחות</span>
+          <span class="sub" id="tradeCount"></span></div>
+        <div id="tradesList"><div class="msg">אין עסקאות פתוחות.</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><span>יומן</span>
+          <span class="sub" id="journalStat"></span></div>
+        <div id="journalList"><div class="msg">אין עסקאות סגורות.</div></div>
+      </div>
+    </section>
+
    </div>
   </div>
 
@@ -134,6 +197,10 @@
     <button class="tab" data-page="watch" onclick="goTab('watch')">
       <svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
       <span>מעקב</span>
+    </button>
+    <button class="tab" data-page="trades" onclick="goTab('trades')">
+      <svg viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M7 15l4-5 3 3 5-7"/></svg>
+      <span>עסקאות</span>
     </button>
   </nav>
 </div>

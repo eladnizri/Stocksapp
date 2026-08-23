@@ -680,6 +680,110 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 /* An <a> styled as .btn needs the padding box a <button> gets for free. */
 a.btn { display: block; text-decoration: none; }
 
+/* ---------------------------------------------------------------- trades */
+.trade {
+  background: var(--surface-2); border-radius: var(--r-md);
+  padding: 13px; margin-bottom: 10px;
+}
+.trade:last-child { margin-bottom: 0; }
+.tr-top { display: flex; align-items: center; gap: 9px; }
+.tr-sym { font-weight: 800; font-size: 1rem; padding: 0; }
+.tr-r {
+  margin-inline-start: auto; font-size: 1rem; font-weight: 800;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.tr-r.up { color: var(--gain); }
+.tr-r.down { color: var(--loss); }
+.tr-x {
+  width: 26px; height: 26px; border-radius: 8px; flex: none;
+  display: grid; place-items: center; color: var(--muted);
+  background: var(--surface); font-size: .88rem; font-weight: 700;
+}
+.tr-now { display: flex; align-items: baseline; gap: 9px; margin-top: 2px; }
+.tr-now .pr {
+  font-size: 1.25rem; font-weight: 800; letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.tr-now .pl {
+  font-size: .82rem; font-weight: 700;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.tr-now .pl.up { color: var(--gain); }
+.tr-now .pl.down { color: var(--loss); }
+
+/* Stop on the left, target on the right, in physical space - the gradient and
+   the marker offsets are both left-anchored, and CSS gradients ignore RTL. */
+.rail {
+  position: relative; height: 10px; border-radius: 999px; direction: ltr;
+  margin: 11px 0 6px;
+  background: linear-gradient(90deg,
+    rgba(224,99,78,.30) 0%, rgba(224,99,78,.12) 32%,
+    rgba(47,158,106,.14) 68%, rgba(47,158,106,.34) 100%);
+  overflow: visible;
+}
+.rail-fill {
+  position: absolute; inset: 0 auto 0 0; height: 100%;
+  border-radius: 999px; background: rgba(63,158,115,.18);
+  transition: width .5s cubic-bezier(.22, 1, .36, 1);
+}
+.rail-entry {
+  position: absolute; top: -3px; width: 2px; height: 16px;
+  background: var(--ink-2); transform: translateX(-50%); border-radius: 2px;
+}
+.rail-now {
+  position: absolute; top: 50%; width: 13px; height: 13px;
+  margin-top: -6.5px; margin-left: -6.5px;
+  border-radius: 999px; background: var(--surface);
+  border: 3px solid var(--primary-500);
+  box-shadow: 0 1px 4px rgba(47,90,70,.3);
+  transition: left .5s cubic-bezier(.22, 1, .36, 1);
+}
+.rail-lb {
+  display: flex; justify-content: space-between; direction: ltr;
+  font-size: .68rem; color: var(--ink-2); font-weight: 600;
+}
+.tr-meta {
+  font-size: .7rem; color: var(--muted); margin-top: 7px;
+  direction: rtl;
+}
+
+/* ---- entry guard ---- */
+.guard { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.g-row {
+  display: flex; align-items: flex-start; gap: 7px;
+  font-size: .74rem; line-height: 1.5;
+  padding: 8px 10px; border-radius: 10px;
+}
+.g-row.warn { background: rgba(207,138,31,.12); color: #8a5d10; }
+.g-row.bad { background: rgba(224,99,78,.13); color: #a33d2c; }
+.g-i {
+  width: 15px; height: 15px; border-radius: 999px; flex: none;
+  display: grid; place-items: center; margin-top: 1px;
+  font-size: .6rem; font-weight: 800; color: #fff;
+}
+.g-row.warn .g-i { background: var(--watch); }
+.g-row.bad .g-i { background: var(--alert); }
+
+/* ---- journal ---- */
+.jrow {
+  display: grid; grid-template-columns: auto 1fr auto auto;
+  align-items: center; gap: 9px;
+  padding: 9px 11px; border-radius: var(--r-sm);
+  background: var(--surface-2); margin-bottom: 7px;
+}
+.jrow:last-child { margin-bottom: 0; }
+.jrow .sym { font-weight: 800; font-size: .85rem; }
+.jrow .dt {
+  font-size: .68rem; color: var(--muted);
+  direction: ltr; unicode-bidi: isolate; text-align: start;
+}
+.jrow .r {
+  font-size: .85rem; font-weight: 800;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.jrow .r.up { color: var(--gain); }
+.jrow .r.down { color: var(--loss); }
+
 /* ---------------------------------------------------------------- states */
 .msg {
   font-size: .84rem; color: var(--ink-2); line-height: 1.6;
@@ -695,7 +799,8 @@ a.btn { display: block; text-decoration: none; }
 
 /* --------------------------------------------------------------- tabbar */
 .tabbar {
-  display: grid; grid-template-columns: repeat(2, 1fr);
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  --tab-n: 3;
   background: linear-gradient(180deg, rgba(240, 247, 242, .74), rgba(240, 247, 242, .96));
   backdrop-filter: saturate(160%) blur(16px);
   -webkit-backdrop-filter: saturate(160%) blur(16px);
@@ -707,7 +812,9 @@ a.btn { display: block; text-decoration: none; }
 .tab-pill {
   position: absolute; top: 6px; height: 3px; width: 34px; border-radius: 999px;
   background: var(--primary-500);
-  inset-inline-start: calc(var(--tab-idx) * 50% + 25% - 17px);
+  /* Centred over tab N of --tab-n, so adding a tab only changes that number. */
+  inset-inline-start: calc(
+    (var(--tab-idx) * 100% + 50%) / var(--tab-n) - 17px);
   transition: inset-inline-start .28s cubic-bezier(.22, 1, .36, 1);
   pointer-events: none;
 }

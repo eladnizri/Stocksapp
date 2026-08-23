@@ -47,7 +47,9 @@ var LS = {
   /* Set the moment an alert changes and cleared once the change reaches
      GitHub. Without it a copy that failed to push would silently adopt the
      older remote list on the next open and lose the change. */
-  dirty: 'sa_dirty'
+  dirty: 'sa_dirty',
+  trades: 'sa_trades',
+  risk: 'sa_risk'
 };
 
 var store = {
@@ -201,7 +203,7 @@ function useSnapshot(d, isCache) {
 }
 
 /* ------------------------------------------------------------ navigation */
-var TAB_ORDER = ['market', 'watch'];
+var TAB_ORDER = ['market', 'watch', 'trades'];
 
 function reduced() {
   try {
@@ -294,6 +296,7 @@ function goTab(name, opts) {
   }
 
   if (name === 'watch') { renderAlerts(); checkAlerts(false); renderFilters(); }
+  if (name === 'trades') { renderTrades(); }
   if (name === 'market') {
     loadTickers(); renderBreadth(); renderSectors();
     renderChanges(); renderEarningsSoon();
@@ -1018,6 +1021,387 @@ function checkAlerts(force) {
   });
 }
 
+/* ================================================================ trades ==
+ * A setup you are actually in, rather than a stock you are looking at.
+ *
+ * The numbers are kept in R - one R is the distance from entry to stop, the
+ * money at risk per share. "+1.8R" compares across trades of different sizes
+ * and different stocks; "+$340" does not say whether that was a good trade.
+ */
+var TRADE_ATR_STOP = 2;    // stop this many ATR from entry
+var TRADE_RR = 2;          // and a target this many R away
+
+function trades() { return store.get(LS.trades, []); }
+function setTrades(v) { store.set(LS.trades, v); }
+function openTrades() {
+  return trades().filter(function (t) { return t.status !== 'closed'; });
+}
+
+function riskCfg() {
+  return store.get(LS.risk, { acct: null, pct: 1 });
+}
+
+function saveRisk() {
+  var a = parseFloat(($('#r-acct') || {}).value);
+  var p = parseFloat(($('#r-pct') || {}).value);
+  store.set(LS.risk, {
+    acct: isNaN(a) ? null : a,
+    pct: isNaN(p) ? null : p
+  });
+  paintRiskNote();
+}
+
+function paintRiskNote() {
+  var c = riskCfg();
+  var el = $('#riskNote');
+  if (!el) return;
+  el.textContent = (c.acct && c.pct)
+    ? 'סיכון לעסקה ' + money(c.acct * c.pct / 100)
+    : '';
+}
+
+/* The suggestion, from the ATR in the nightly snapshot. A stop closer than
+   one ATR sits inside a normal day's range, so it gets hit by noise rather
+   than by the setup failing. */
+function suggestLevels(sym, entry) {
+  var row = SNAP_BY_SYM[sym];
+  var atr = row && row.t && row.t.atr;
+  if (!atr || !entry) return null;
+  var stop = entry - TRADE_ATR_STOP * atr;
+  if (stop <= 0) return null;
+  return {
+    atr: atr,
+    stop: stop,
+    target: entry + TRADE_RR * (entry - stop)
+  };
+}
+
+function touchField(el) { el.dataset.touched = '1'; }
+
+function resetTradeForm() {
+  ['t-sym', 't-entry', 't-stop', 't-target', 't-qty'].forEach(function (id) {
+    var el = $('#' + id);
+    if (el) { el.value = ''; delete el.dataset.touched; }
+  });
+  $('#t-guard').innerHTML = '';
+  $('#tSugNote').textContent = '';
+}
+
+/* Fills the stop and target once the symbol and entry are known, but never
+   overwrites a value the user typed. */
+function onTradeInput() {
+  var sym = ($('#t-sym').value || '').trim().toUpperCase();
+  var entry = parseFloat($('#t-entry').value);
+  var note = $('#tSugNote');
+
+  if (!sym || isNaN(entry) || entry <= 0) {
+    note.textContent = '';
+    $('#t-guard').innerHTML = '';
+    return;
+  }
+  var s = suggestLevels(sym, entry);
+  if (!s) {
+    note.textContent = SNAP_BY_SYM[sym] ? 'אין ATR' : 'לא במאגר';
+  } else {
+    note.textContent = 'ATR ' + money(s.atr);
+    var st = $('#t-stop'), tg = $('#t-target');
+    if (!st.dataset.touched) st.value = s.stop.toFixed(2);
+    if (!tg.dataset.touched) tg.value = s.target.toFixed(2);
+  }
+  paintGuard();
+}
+
+function suggestSize() {
+  var c = riskCfg();
+  var entry = parseFloat($('#t-entry').value);
+  var stop = parseFloat($('#t-stop').value);
+  var note = $('#tSugNote');
+  if (!c.acct || !c.pct) { note.textContent = 'מלא גודל תיק וסיכון'; return; }
+  if (isNaN(entry) || isNaN(stop) || entry <= stop) {
+    note.textContent = 'צריך כניסה וסטופ תקינים';
+    return;
+  }
+  var perShare = entry - stop;
+  var qty = Math.floor((c.acct * c.pct / 100) / perShare);
+  $('#t-qty').value = qty > 0 ? qty : '';
+  note.textContent = qty > 0
+    ? qty + ' מניות · סיכון ' + money(qty * perShare)
+    : 'הסיכון למניה גדול מהתקציב';
+}
+
+/* Everything worth being told before committing, from data already held. */
+function tradeGuard(sym, entry, stop, target) {
+  var out = [];
+  var row = SNAP_BY_SYM[sym];
+  if (isNaN(entry) || isNaN(stop) || entry <= 0) return out;
+
+  if (stop >= entry) {
+    out.push(['bad', 'הסטופ מעל הכניסה — לונג צריך סטופ נמוך יותר']);
+    return out;
+  }
+  var risk = entry - stop;
+
+  if (!isNaN(target)) {
+    if (target <= entry) {
+      out.push(['bad', 'היעד מתחת לכניסה']);
+    } else {
+      var rr = (target - entry) / risk;
+      if (rr < 1.5) {
+        out.push(['bad', 'יחס סיכוי/סיכון ' + num(rr, 1) +
+          ':1 — נמוך מדי כדי להצדיק את העסקה']);
+      } else if (rr < 2) {
+        out.push(['warn', 'יחס סיכוי/סיכון ' + num(rr, 1) + ':1 — גבולי']);
+      }
+    }
+  }
+
+  if (!row) {
+    out.push(['warn', sym + ' לא במאגר הנסרק — אין בדיקות טכניות']);
+    return out;
+  }
+  var t = row.t || {};
+
+  if (t.atr) {
+    var inAtr = risk / t.atr;
+    if (inAtr < 1) {
+      out.push(['bad', 'הסטופ במרחק ' + num(inAtr, 1) +
+        ' ATR — צר מתנועה יומית רגילה, ייצא מרעש']);
+    } else if (inAtr > 4) {
+      out.push(['warn', 'הסטופ במרחק ' + num(inAtr, 1) +
+        ' ATR — רחב, הפוזיציה תצא קטנה']);
+    }
+  }
+
+  // The classic way a technical swing gets gapped through its stop.
+  if (row.er && row.er.d) {
+    var d = new Date(row.er.d + 'T12:00:00');
+    var mid = new Date(); mid.setHours(0, 0, 0, 0);
+    var days = Math.floor((d - mid) / 86400000);
+    if (days >= 0 && days <= 10) {
+      out.push([days <= 4 ? 'bad' : 'warn', 'דוח בעוד ' + days +
+        ' ימים — גאפ יכול לדלג מעל הסטופ']);
+    }
+  }
+
+  if (t.rsi != null && t.rsi > 75) {
+    out.push(['warn', 'RSI ' + num(t.rsi, 0) + ' — קנוי־יתר']);
+  }
+  if (t.vma50 != null && t.vma50 < 0) {
+    out.push(['warn', 'המחיר מתחת לממוצע 50 — כניסה נגד המגמה הקצרה']);
+  }
+  if (t.vma200 != null && t.vma200 < 0) {
+    out.push(['warn', 'המחיר מתחת לממוצע 200 — מגמה ארוכת טווח יורדת']);
+  }
+  return out;
+}
+
+function guardHtml(list) {
+  if (!list.length) return '';
+  return '<div class="guard">' + list.map(function (g) {
+    return '<div class="g-row ' + g[0] + '"><span class="g-i">' +
+      (g[0] === 'bad' ? '!' : 'i') + '</span><span>' + esc(g[1]) +
+      '</span></div>';
+  }).join('') + '</div>';
+}
+
+function paintGuard() {
+  var sym = ($('#t-sym').value || '').trim().toUpperCase();
+  var g = tradeGuard(sym, parseFloat($('#t-entry').value),
+                     parseFloat($('#t-stop').value),
+                     parseFloat($('#t-target').value));
+  $('#t-guard').innerHTML = guardHtml(g);
+}
+
+function addTrade() {
+  var sym = ($('#t-sym').value || '').trim().toUpperCase();
+  var entry = parseFloat($('#t-entry').value);
+  var stop = parseFloat($('#t-stop').value);
+  var target = parseFloat($('#t-target').value);
+  var qty = parseFloat($('#t-qty').value);
+  var note = $('#tSugNote');
+
+  if (!sym || isNaN(entry) || isNaN(stop)) {
+    note.textContent = 'צריך סימבול, כניסה וסטופ';
+    return;
+  }
+  if (stop >= entry) { note.textContent = 'הסטופ חייב להיות מתחת לכניסה'; return; }
+
+  var list = trades();
+  list.unshift({
+    id: Date.now(),
+    s: sym,
+    entry: entry,
+    stop: stop,
+    target: isNaN(target) ? null : target,
+    qty: isNaN(qty) ? null : qty,
+    opened: new Date().toISOString().slice(0, 10),
+    status: 'open'
+  });
+  setTrades(list);
+  syncTradeAlerts();
+  resetTradeForm();
+  renderTrades();
+  haptic(12);
+}
+
+/* Every open trade keeps a stop alert and a target alert, so the levels reach
+   the phone through the checker that already runs. Rebuilt wholesale rather
+   than patched, so closing a trade cannot leave its alerts behind. */
+function syncTradeAlerts() {
+  var manual = store.get(LS.alerts, []).filter(function (a) { return !a.tid; });
+  var made = [];
+  openTrades().forEach(function (t) {
+    made.push({ s: t.s, d: 'below', p: t.stop, t: t.id, tid: t.id, kind: 'stop' });
+    if (t.target) {
+      made.push({ s: t.s, d: 'above', p: t.target, t: t.id, tid: t.id, kind: 'target' });
+    }
+  });
+  store.set(LS.alerts, manual.concat(made));
+  renderAlerts();
+  queueSync();
+}
+
+function closeTrade(id) {
+  var list = trades();
+  var t = null;
+  for (var i = 0; i < list.length; i++) if (list[i].id === id) t = list[i];
+  if (!t) return;
+  var live = ALERT_PRICES[t.s];
+  var val = prompt('מחיר יציאה ל־' + t.s + ':',
+                   live != null ? live.toFixed(2) : '');
+  if (val === null) return;
+  var exit = parseFloat(val);
+  if (isNaN(exit)) return;
+  t.status = 'closed';
+  t.exit = exit;
+  t.closed = new Date().toISOString().slice(0, 10);
+  setTrades(list);
+  syncTradeAlerts();
+  renderTrades();
+}
+
+function deleteTrade(id) {
+  setTrades(trades().filter(function (t) { return t.id !== id; }));
+  syncTradeAlerts();
+  renderTrades();
+}
+
+function tradeR(t, price) {
+  var risk = t.entry - t.stop;
+  if (!risk || price == null) return null;
+  return (price - t.entry) / risk;
+}
+
+function renderTrades() {
+  paintRiskNote();
+  var c = riskCfg();
+  if ($('#r-acct') && !$('#r-acct').value && c.acct) $('#r-acct').value = c.acct;
+  if ($('#r-pct') && !$('#r-pct').value && c.pct != null) $('#r-pct').value = c.pct;
+
+  var open = openTrades();
+  var box = $('#tradesList');
+  $('#tradeCount').textContent = open.length ? open.length + ' פתוחות' : '';
+
+  if (!open.length) {
+    box.innerHTML = '<div class="msg">אין עסקאות פתוחות. הזן סימבול ומחיר ' +
+      'כניסה למעלה — הסטופ והיעד יוצעו לפי ATR.</div>';
+  } else {
+    box.innerHTML = open.map(function (t) {
+      var price = ALERT_PRICES[t.s];
+      if (price == null) {
+        var snap = SNAP_BY_SYM[t.s];
+        if (snap && snap.t) price = snap.t.price;
+      }
+      var r = tradeR(t, price);
+      var risk = t.entry - t.stop;
+      var pl = (price != null && t.qty) ? (price - t.entry) * t.qty : null;
+
+      // Position on the stop..target rail, in physical left-to-right space.
+      var lo = t.stop, hi = t.target || (t.entry + risk * TRADE_RR);
+      var pos = price == null ? null
+        : Math.max(0, Math.min(100, ((price - lo) / (hi - lo)) * 100));
+      var entryPos = Math.max(0, Math.min(100, ((t.entry - lo) / (hi - lo)) * 100));
+
+      var toStop = price != null ? ((t.stop - price) / price) * 100 : null;
+      var toTgt = (price != null && t.target)
+        ? ((t.target - price) / price) * 100 : null;
+
+      var g = tradeGuard(t.s, t.entry, t.stop, t.target);
+      var bad = g.filter(function (x) { return x[0] === 'bad'; });
+
+      return '<div class="trade">' +
+        '<div class="tr-top">' +
+          '<button class="tr-sym" onclick="analyze(\'' + esc(t.s) + '\')">' +
+            esc(t.s) + '</button>' +
+          '<span class="tr-r ' + cls(r) + '">' +
+            (r == null ? '—' : (r > 0 ? '+' : '') + num(r, 2) + 'R') + '</span>' +
+          '<button class="tr-x" onclick="deleteTrade(' + t.id +
+            ')" aria-label="מחק">✕</button>' +
+        '</div>' +
+        '<div class="tr-now">' +
+          '<span class="pr">' + (price == null ? '…' : money(price)) + '</span>' +
+          (pl != null ? '<span class="pl ' + cls(pl) + '">' +
+            (pl > 0 ? '+' : '') + money(pl) + '</span>' : '') +
+        '</div>' +
+        '<div class="rail">' +
+          '<i class="rail-fill" style="width:' + (pos == null ? 0 : pos) + '%"></i>' +
+          '<i class="rail-entry" style="left:' + entryPos + '%"></i>' +
+          (pos == null ? '' : '<i class="rail-now" style="left:' + pos + '%"></i>') +
+        '</div>' +
+        '<div class="rail-lb">' +
+          '<span>סטופ ' + money(t.stop) +
+            (toStop != null ? ' · ' + num(toStop, 1) + '%' : '') + '</span>' +
+          '<span>' + (t.target ? 'יעד ' + money(t.target) +
+            (toTgt != null ? ' · +' + num(toTgt, 1) + '%' : '') : 'ללא יעד') +
+          '</span>' +
+        '</div>' +
+        '<div class="tr-meta">כניסה ' + money(t.entry) +
+          (t.qty ? ' · ' + t.qty + ' מניות · סיכון ' + money(risk * t.qty) : '') +
+          ' · ' + esc(t.opened) + '</div>' +
+        (bad.length ? guardHtml(bad) : '') +
+        '<button class="btn ghost" style="margin-top:9px" onclick="closeTrade(' +
+          t.id + ')">סגור עסקה</button>' +
+        '</div>';
+    }).join('');
+  }
+
+  renderJournal();
+  // Open trades need a live price even when the alerts card is not on screen.
+  checkAlerts(false);
+}
+
+function renderJournal() {
+  var done = trades().filter(function (t) { return t.status === 'closed'; });
+  var box = $('#journalList');
+  var stat = $('#journalStat');
+  if (!done.length) {
+    box.innerHTML = '<div class="msg">עסקאות שתסגור יופיעו כאן, עם התוצאה ' +
+      'ב־R.</div>';
+    if (stat) stat.textContent = '';
+    return;
+  }
+  var rs = done.map(function (t) { return tradeR(t, t.exit); })
+               .filter(function (v) { return v != null; });
+  var wins = rs.filter(function (v) { return v > 0; }).length;
+  var total = rs.reduce(function (a, v) { return a + v; }, 0);
+  if (stat) {
+    stat.textContent = done.length + ' · ' +
+      Math.round((wins / rs.length) * 100) + '% מוצלחות · ' +
+      (total > 0 ? '+' : '') + num(total, 1) + 'R';
+  }
+  box.innerHTML = done.slice(0, 30).map(function (t) {
+    var r = tradeR(t, t.exit);
+    return '<div class="jrow">' +
+      '<span class="sym">' + esc(t.s) + '</span>' +
+      '<span class="dt">' + esc(t.opened) + ' → ' + esc(t.closed || '') + '</span>' +
+      '<span class="r ' + cls(r) + '">' +
+        (r == null ? '—' : (r > 0 ? '+' : '') + num(r, 2) + 'R') + '</span>' +
+      '<button class="tr-x" onclick="deleteTrade(' + t.id +
+        ')" aria-label="מחק">✕</button>' +
+      '</div>';
+  }).join('');
+}
+
 /* -------------------------------------------------------------- screener */
 var FILTERS = [
   ['score', 'ציון כולל', 0, 100,
@@ -1668,7 +2052,11 @@ var REPO_EDIT_URL =
 
 function alertsSyncJson() {
   var list = store.get(LS.alerts, []).map(function (a) {
-    return { s: a.s, d: a.d, p: a.p };
+    var o = { s: a.s, d: a.d, p: a.p };
+    // Carried through so the trade an alert belongs to survives a round trip
+    // to GitHub and back. The checker reads only s, d and p and ignores these.
+    if (a.tid) { o.tid = a.tid; o.kind = a.kind; }
+    return o;
   });
   return JSON.stringify({ alerts: list }, null, 2);
 }
@@ -1899,7 +2287,9 @@ function pullAlerts() {
       var p = parseFloat(a.p);
       if (isNaN(p) || p <= 0) continue;
       if (a.d !== 'above' && a.d !== 'below') continue;
-      clean.push({ s: String(a.s).toUpperCase(), d: a.d, p: p, t: Date.now() });
+      var row = { s: String(a.s).toUpperCase(), d: a.d, p: p, t: Date.now() };
+      if (a.tid) { row.tid = a.tid; row.kind = a.kind; }
+      clean.push(row);
     }
 
     var before = alertsSyncJson();
