@@ -72,10 +72,35 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   max-width: 620px; margin: 0 auto;
   position: relative;
 }
-.pages { min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-.pages::-webkit-scrollbar { display: none; }
-.page { display: none; padding: 0 16px 28px; }
-.page.on { display: block; }
+/* The two pages live side by side on a track that slides, so navigation is a
+   continuous movement the finger can drive rather than a hard swap. In RTL the
+   flex row starts at the right edge, so page 0 sits in view and page 1 waits
+   off-screen to the LEFT - which is why a higher index translates the track
+   rightward, and why dragging right advances. */
+.pages { min-height: 0; overflow: hidden; position: relative; }
+.track {
+  display: flex; height: 100%;
+  --page-idx: 0;
+  transform: translateX(calc(var(--page-idx) * 100%));
+  transition: transform .38s cubic-bezier(.25, .9, .3, 1);
+  will-change: transform;
+}
+.track.dragging { transition: none; }
+.page {
+  flex: 0 0 100%; min-width: 0;
+  height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 0 16px 28px;
+  /* Keeps a horizontal drag from also scrolling the page under it. */
+  overscroll-behavior-y: contain;
+}
+.page::-webkit-scrollbar { display: none; }
+/* Cards settle in when their page becomes the active one, so arriving on a
+   tab reads as arriving somewhere rather than a static repaint. */
+.page.enter .card { animation: rise .5s cubic-bezier(.22, 1, .36, 1) backwards; }
+.page.enter .card:nth-child(1) { animation-delay: .02s; }
+.page.enter .card:nth-child(2) { animation-delay: .08s; }
+.page.enter .card:nth-child(3) { animation-delay: .14s; }
+.page.enter .card:nth-child(4) { animation-delay: .2s; }
 
 .head {
   padding: calc(env(safe-area-inset-top) + 18px) 0 14px;
@@ -104,14 +129,12 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   box-shadow: var(--shadow);
   padding: 18px;
   margin-bottom: var(--gap);
-  animation: rise .45s cubic-bezier(.22, 1, .36, 1) backwards;
 }
-.card:nth-child(2) { animation-delay: .05s; }
-.card:nth-child(3) { animation-delay: .1s; }
 @keyframes rise {
-  from { opacity: 0; transform: translateY(12px); }
+  from { opacity: 0; transform: translateY(14px); }
   to { opacity: 1; transform: none; }
 }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .card-h {
   display: flex; align-items: center; justify-content: space-between;
   gap: 10px; margin-bottom: 14px;
@@ -235,26 +258,59 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 /* ----------------------------------------------------------------- modal */
 .modal { position: fixed; inset: 0; z-index: 60; display: flex; align-items: flex-end; justify-content: center; }
 .modal.hidden { display: none; }
-.modal-backdrop { position: absolute; inset: 0; background: rgba(30, 50, 42, .34); }
+.modal-backdrop {
+  position: absolute; inset: 0; background: rgba(30, 50, 42, .34);
+  opacity: 0; transition: opacity .34s ease;
+}
+.modal.open .modal-backdrop { opacity: 1; }
 .modal-sheet {
   position: relative; width: 100%; max-width: 620px;
   background: var(--surface);
   border-radius: 24px 24px 0 0;
-  padding: 14px 16px calc(env(safe-area-inset-bottom) + 18px);
+  padding: 6px 16px calc(env(safe-area-inset-bottom) + 18px);
   box-shadow: 0 -18px 50px -20px rgba(47, 90, 70, .35);
   max-height: 88vh; overflow-y: auto;
-  animation: sheetUp .25s ease;
+  overscroll-behavior: contain;
+  /* Transform-driven rather than a keyframe, so a downward drag can take hold
+     of the sheet mid-flight and hand it back without a jump. */
+  transform: translateY(100%);
+  transition: transform .38s cubic-bezier(.25, .9, .3, 1);
+  will-change: transform;
 }
-@keyframes sheetUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+.modal.open .modal-sheet { transform: translateY(0); }
+.modal.dragging .modal-sheet,
+.modal.dragging .modal-backdrop { transition: none; }
+.modal-sheet::-webkit-scrollbar { display: none; }
+/* The grip is a 40px bar inside a much taller invisible target - the gesture
+   has to be catchable without aiming at a 4px line. */
 .sheet-grip {
-  width: 40px; height: 4px; border-radius: 999px; background: #dbe5dd;
-  margin: 0 auto 12px;
+  position: sticky; top: 0; z-index: 2;
+  display: block; height: 26px; margin: -6px -16px 4px;
+  background: linear-gradient(180deg, var(--surface) 62%, transparent);
+  cursor: grab;
 }
+.sheet-grip::before {
+  content: ''; position: absolute; top: 9px; left: 50%;
+  width: 40px; height: 4px; margin-left: -20px;
+  border-radius: 999px; background: #dbe5dd;
+  transition: background .18s, width .18s;
+}
+.modal.dragging .sheet-grip::before { background: var(--primary); width: 54px; }
 .modal-sheet .card {
   box-shadow: none; border: 1px solid var(--line);
-  padding: 15px; margin-bottom: 11px; animation: none;
+  padding: 15px; margin-bottom: 11px;
+  animation: rise .42s cubic-bezier(.22, 1, .36, 1) backwards;
 }
+.modal-sheet .card:nth-child(1) { animation-delay: .04s; }
+.modal-sheet .card:nth-child(2) { animation-delay: .09s; }
+.modal-sheet .card:nth-child(3) { animation-delay: .14s; }
+.modal-sheet .card:nth-child(4) { animation-delay: .19s; }
+.modal-sheet .card:nth-child(5) { animation-delay: .23s; }
+.modal-sheet .card:nth-child(n+6) { animation-delay: .27s; }
 .modal-sheet .card:last-child { margin-bottom: 0; }
+/* A re-render triggered by the live quote landing must not replay the whole
+   stagger - only the first paint of a symbol is an entrance. */
+.modal-sheet.quiet .card { animation: none; }
 
 /* ------------------------------------------------------------ quote head */
 .q-head { margin-bottom: 14px; }
@@ -308,6 +364,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   font-size: 1.42rem; font-weight: 800; line-height: 1;
   font-variant-numeric: tabular-nums; letter-spacing: -.03em;
 }
+.score-ring svg { transform: rotate(-90deg); }
+.score-ring circle {
+  transition: stroke-dasharray .95s cubic-bezier(.22, 1, .36, 1);
+}
 .score-verdict { font-size: 1.05rem; font-weight: 800; }
 .score-note { font-size: .76rem; color: var(--ink-2); line-height: 1.55; margin-top: 4px; }
 
@@ -351,16 +411,28 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   padding: 10px 12px; border-radius: var(--r-sm); background: var(--surface-2);
   font-size: .84rem;
 }
+.lvl { transition: background .16s, transform .12s; }
+.lvl.cur { background: var(--primary-soft); font-weight: 800; }
+.lvl.cur .lb { color: var(--ink); }
 .lvl.now { background: var(--primary-soft); font-weight: 800; }
 .lvl .lb { color: var(--ink-2); font-weight: 600; }
 .lvl.now .lb { color: var(--ink); }
-.lvl .vl {
+/* renderLevels() writes .pr and .dt; the old .vl/.d rules here matched
+   nothing, which is why every level rendered as unweighted body text. */
+.lvl .pr, .lvl .vl {
   font-weight: 800; font-variant-numeric: tabular-nums;
   direction: ltr; unicode-bidi: isolate;
 }
-.lvl .d { font-size: .74rem; font-weight: 700; }
-.lvl .d.up { color: var(--gain); }
-.lvl .d.down { color: var(--loss); }
+.lvl .dt, .lvl .d {
+  font-size: .74rem; font-weight: 700; color: var(--muted);
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+  margin-inline-start: 6px;
+}
+/* Above the price is overhead, below it is a floor - worth seeing at a glance
+   without reading the numbers. */
+.lvl.res { border-inline-start: 3px solid rgba(224, 99, 78, .5); }
+.lvl.sup { border-inline-start: 3px solid rgba(47, 158, 106, .5); }
+.lvl.cur { border-inline-start: 3px solid var(--primary); }
 
 /* -------------------------------------------------------- metric tables */
 .mtable { display: flex; flex-direction: column; gap: 8px; }
@@ -372,6 +444,18 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 .mrow .bar { height: 6px; border-radius: 999px; background: #e8efe9; overflow: hidden; direction: ltr; }
 .mrow .bar i { display: block; height: 100%; border-radius: 999px; }
+/* metricRow() writes .mini, and nothing styled it - the <i> stayed inline with
+   no height, so the whole third column rendered blank. */
+.mrow .mini {
+  height: 6px; border-radius: 999px; background: #e8efe9;
+  overflow: hidden; direction: ltr;
+}
+.mrow .mini i {
+  display: block; height: 100%; border-radius: 999px;
+  transition: width .75s cubic-bezier(.22, 1, .36, 1);
+}
+.mrow .vl.up { color: var(--gain); }
+.mrow .vl.down { color: var(--loss); }
 
 /* ---------------------------------------------------------------- alerts */
 .alert {
@@ -427,12 +511,24 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   display: block; margin-bottom: 5px;
   font-size: .72rem; font-weight: 700; color: var(--primary-500);
 }
+/* Expands instead of appearing: the panel used to be toggled with the hidden
+   attribute, so the row below it jumped by its full height in one frame. */
 .fhelp {
   font-size: .76rem; line-height: 1.6; color: var(--ink-2);
   background: var(--surface-2); border-inline-start: 3px solid var(--primary);
-  border-radius: 10px; padding: 10px 12px; margin: -3px 0 12px;
+  border-radius: 10px; overflow: hidden;
+  max-height: 0; opacity: 0; padding: 0 12px; margin: -3px 0 0;
+  transition: max-height .32s cubic-bezier(.22, 1, .36, 1), opacity .24s ease,
+              padding .32s ease, margin .32s ease;
+}
+.fhelp.open {
+  max-height: 320px; opacity: 1; padding: 10px 12px; margin: -3px 0 12px;
 }
 .frow > * { flex: 1; min-width: 0; }
+/* A filter label competes with two number inputs that need far less room -
+   at an equal third, "שווי שוק (מיליארד $)" broke over three lines. */
+.frow .lb { flex: 1.7; }
+.frow input[inputmode="decimal"] { flex: .85; }
 .frow input, .frow select {
   width: 100%; font: inherit; font-size: .92rem; font-weight: 500; color: var(--ink);
   padding: 11px 12px; border-radius: 11px;
@@ -458,7 +554,11 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   width: 100%; text-align: start;
 }
 .hit:last-child { margin-bottom: 0; }
-.hit:active { background: var(--primary-soft); }
+.hit { transition: background .16s, transform .12s cubic-bezier(.22, 1, .36, 1); }
+.hit:active { background: var(--primary-soft); transform: scale(.975); }
+/* Results arrive as a run rather than all at once, so a scan reads as
+   something that just happened. */
+#screenResults .hit { animation: rise .38s cubic-bezier(.22, 1, .36, 1) backwards; }
 .hit-score {
   width: 40px; height: 40px; border-radius: 12px;
   display: grid; place-items: center;
@@ -516,12 +616,14 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 .tab {
   display: flex; flex-direction: column; align-items: center; gap: 2px;
-  padding: 10px 0 7px; color: var(--muted); transition: color .15s, transform .12s;
+  padding: 10px 0 7px; color: var(--muted); transition: color .2s;
 }
-.tab:active { transform: scale(.92); }
 .tab svg {
   width: 23px; height: 23px; fill: none; stroke: currentColor;
   stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round;
+  transition: transform .32s cubic-bezier(.34, 1.56, .64, 1);
 }
-.tab span { font-size: .66rem; font-weight: 600; }
+.tab:active svg { transform: scale(.88); }
+.tab.on svg { transform: translateY(-1px) scale(1.1); }
+.tab span { font-size: .66rem; font-weight: 600; transition: opacity .2s; }
 .tab.on { color: var(--primary-500); }

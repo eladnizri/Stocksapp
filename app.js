@@ -193,11 +193,82 @@ function useSnapshot(d, isCache) {
 }
 
 /* ------------------------------------------------------------ navigation */
-function goTab(name) {
+var TAB_ORDER = ['market', 'watch'];
+
+function reduced() {
+  try {
+    return window.matchMedia &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  } catch (e) { return false; }
+}
+
+/* A short tick on navigation and on a fired alert. Absent on iOS Safari, which
+   simply has no vibrate - the guard makes that a no-op rather than a throw. */
+function haptic(ms) {
+  try { if (navigator.vibrate) navigator.vibrate(ms || 8); } catch (e) {}
+}
+
+/* Replays the card stagger on the page being entered. The class has to come
+   off first and the reflow has to be forced, or re-entering the same tab
+   re-adds a class that is already there and nothing animates. */
+function playEnter(el) {
+  if (!el || reduced()) return;
+  el.classList.remove('enter');
+  void el.offsetWidth;
+  el.classList.add('enter');
+}
+
+/* Bars render at zero width carrying their target in data-w, then get it
+   applied a frame later so the CSS width transition has two values to move
+   between. Painting the final width straight into the markup gives the
+   transition nothing to do and the bar simply appears. */
+function paintBars(root, animate) {
+  if (!root) return;
+  var bars = root.querySelectorAll('[data-w]');
+  if (!bars.length) return;
+  var apply = function () {
+    for (var i = 0; i < bars.length; i++) {
+      bars[i].style.width = bars[i].getAttribute('data-w') + '%';
+    }
+  };
+  if (!animate || reduced()) { apply(); return; }
+  requestAnimationFrame(function () { requestAnimationFrame(apply); });
+}
+
+function animateCount(el, to, dur) {
+  if (!el || to == null || isNaN(to)) return;
+  if (reduced()) { el.textContent = Math.round(to); return; }
+  var t0 = 0;
+  var step = function (now) {
+    if (!t0) t0 = now;
+    var p = Math.min(1, (now - t0) / (dur || 850));
+    el.textContent = Math.round(to * (1 - Math.pow(1 - p, 3)));
+    if (p < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
+}
+
+function goTab(name, opts) {
+  var idx = TAB_ORDER.indexOf(name);
+  if (idx < 0) return;
+  var silent = opts && opts.silent;
+  var was = currentTab();
+
+  var track = $('#track');
+  if (track) {
+    /* Clearing the drag state here makes goTab authoritative: an interrupted
+       gesture leaves an inline transform behind that outranks the stylesheet,
+       and without this a tab tap afterwards would move the index but not the
+       track, stranding the view between pages. */
+    track.classList.remove('dragging');
+    track.style.transform = '';
+    track.style.setProperty('--page-idx', idx);
+  }
+
   var pages = document.querySelectorAll('.page');
-  for (var i = 0; i < pages.length; i++) pages[i].classList.remove('on');
-  var el = $('#p-' + name);
-  if (el) el.classList.add('on');
+  for (var i = 0; i < pages.length; i++) {
+    pages[i].classList.toggle('on', pages[i].id === 'p-' + name);
+  }
 
   var tabs = document.querySelectorAll('.tab');
   for (var j = 0; j < tabs.length; j++) {
@@ -205,22 +276,55 @@ function goTab(name) {
     tabs[j].classList.toggle('on', on);
     if (on) $('#tabbar').style.setProperty('--tab-idx', j);
   }
-  $('#pages').scrollTop = 0;
+
+  if (was !== name) {
+    if (!silent) haptic(8);
+    /* Skipped when a drag brought us here: the page was already on screen and
+       being pulled in, so replaying its entrance would flash content the eye
+       has been tracking the whole way. A tab tap has no such lead-in. */
+    if (!(opts && opts.noEnter)) playEnter($('#p-' + name));
+  }
 
   if (name === 'watch') { renderAlerts(); checkAlerts(false); renderFilters(); }
   if (name === 'market') { loadTickers(); renderBreadth(); renderSectors(); }
 }
 
+function currentTab() {
+  var on = document.querySelector('.tab.on');
+  return on ? on.dataset.page : TAB_ORDER[0];
+}
+
 /* The analysis lives in a bottom sheet so it can be opened from anywhere
    without losing the page underneath. */
+var sheetTimer = null;
+
 function openSheet() {
-  $('#sheet').classList.remove('hidden');
+  var m = $('#sheet');
+  if (sheetTimer) { clearTimeout(sheetTimer); sheetTimer = null; }
+  m.classList.remove('hidden', 'dragging');
+  var sh = $('.modal-sheet');
+  sh.style.transform = '';
+  // Force a frame at translateY(100%) before .open, or the browser collapses
+  // both styles into one paint and the sheet appears with no travel.
+  void m.offsetWidth;
+  m.classList.add('open');
   document.body.style.overflow = 'hidden';
 }
+
 function closeSheet() {
-  $('#sheet').classList.add('hidden');
+  var m = $('#sheet');
+  if (m.classList.contains('hidden')) return;
+  var sh = $('.modal-sheet');
+  m.classList.remove('dragging', 'open');
+  sh.style.transform = '';
   document.body.style.overflow = '';
   CUR = null;
+  if (sheetTimer) clearTimeout(sheetTimer);
+  // Kept in step with the .modal-sheet transition duration in the stylesheet.
+  sheetTimer = setTimeout(function () {
+    m.classList.add('hidden');
+    sheetTimer = null;
+  }, reduced() ? 0 : 380);
 }
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape' && !$('#sheet').classList.contains('hidden')) closeSheet();
@@ -290,11 +394,45 @@ function pushRecent(sym) {
 
 /* -------------------------------------------------------- analysis page */
 var CUR = null;
+/* True only for the first paint of a symbol. The live quote arriving a second
+   later re-renders the same sheet, and replaying the entrance then would look
+   like the panel had reloaded itself. */
+var SHEET_FRESH = false;
+
+/* Reveals the sheet's rings, counters and bars. */
+function runSheetIntro(animate) {
+  var body = $('#sheetBody');
+  var sh = $('.modal-sheet');
+  if (sh) sh.classList.toggle('quiet', !animate);
+  if (!body) return;
+
+  paintBars(body, animate);
+
+  var ring = body.querySelector('.score-ring circle[data-dash]');
+  if (ring) {
+    var d = ring.getAttribute('data-dash');
+    if (!animate || reduced()) ring.setAttribute('stroke-dasharray', d);
+    else requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        ring.setAttribute('stroke-dasharray', d);
+      });
+    });
+  }
+
+  var val = body.querySelector('.score-ring .val[data-to]');
+  if (val) {
+    var to = parseFloat(val.getAttribute('data-to'));
+    if (animate) animateCount(val, to, 850);
+    else if (!isNaN(to)) val.textContent = Math.round(to);
+  }
+}
 
 function analyze(sym) {
   sym = (sym || '').trim().toUpperCase();
   if (!sym) return;
   CUR = sym;
+  SHEET_FRESH = true;
+  haptic(8);
   pushRecent(sym);
   renderRecent();
   $('#results').innerHTML = '';
@@ -363,6 +501,8 @@ function renderAnalysis(sym, row, quote, targets) {
       ' אינה במדדים הנסרקים (S&P 500 / נאסד״ק 100), ולכן אין לה ניתוח יסוד. ' +
       'המחיר החי מוצג למעלה.</div></div>';
     $('#sheetBody').innerHTML = html;
+    runSheetIntro(SHEET_FRESH);
+    SHEET_FRESH = false;
     return;
   }
 
@@ -396,6 +536,8 @@ function renderAnalysis(sym, row, quote, targets) {
   }
 
   $('#sheetBody').innerHTML = html;
+  runSheetIntro(SHEET_FRESH);
+  SHEET_FRESH = false;
 }
 
 /* Next scheduled report. Nasdaq gives a date and, usually, the consensus EPS
@@ -448,9 +590,11 @@ function renderScoreCard(sc) {
         '<svg width="74" height="74">' +
           '<circle cx="37" cy="37" r="32" fill="none" stroke="var(--surface-2)" stroke-width="7"/>' +
           '<circle cx="37" cy="37" r="32" fill="none" stroke="' + col + '" stroke-width="7"' +
-            ' stroke-linecap="round" stroke-dasharray="' + (C * frac) + ' ' + C + '"/>' +
+            ' stroke-linecap="round" stroke-dasharray="0 ' + C + '"' +
+            ' data-dash="' + (C * frac) + ' ' + C + '"/>' +
         '</svg>' +
-        '<div class="val" style="color:' + col + '">' +
+        '<div class="val" style="color:' + col + '"' +
+          (total == null ? '' : ' data-to="' + total + '"') + '>' +
           (total == null ? '—' : total) + '</div>' +
       '</div>' +
       '<div><div class="score-verdict" style="color:' + col + '">' +
@@ -462,8 +606,9 @@ function renderScoreCard(sc) {
       var v = p[1];
       return '<div class="bar-row">' +
         '<span class="lb">' + p[0] + '</span>' +
-        '<span class="bar-track"><i class="bar-fill" style="width:' +
-          (v == null ? 0 : v) + '%;background:' + scoreColor(v) + '"></i></span>' +
+        '<span class="bar-track"><i class="bar-fill" data-w="' +
+          (v == null ? 0 : v) + '" style="width:0;background:' +
+          scoreColor(v) + '"></i></span>' +
         '<span class="vl" style="color:' + scoreColor(v) + '">' +
           (v == null ? '—' : v) + '</span></div>';
     }).join('') + '</div></div>';
@@ -645,8 +790,8 @@ function metricRow(label, v, unit, lo, hi, dec) {
   return '<div class="mrow">' +
     '<span class="lb">' + label + '</span>' +
     '<span class="vl">' + txt + '</span>' +
-    '<span class="mini"><i style="width:' + (s == null ? 0 : s) + '%;background:' +
-      scoreColor(s) + '"></i></span></div>';
+    '<span class="mini"><i data-w="' + (s == null ? 0 : s) +
+      '" style="width:0;background:' + scoreColor(s) + '"></i></span></div>';
 }
 
 function renderFundamentals(row) {
@@ -716,8 +861,8 @@ function renderForecast(tg, price) {
   var bar = function (label, n, color) {
     var w = total ? ((n || 0) / total) * 100 : 0;
     return '<div class="bar-row"><span class="lb">' + label + '</span>' +
-      '<span class="bar-track"><i class="bar-fill" style="width:' + w +
-        '%;background:' + color + '"></i></span>' +
+      '<span class="bar-track"><i class="bar-fill" data-w="' + w.toFixed(1) +
+        '" style="width:0;background:' + color + '"></i></span>' +
       '<span class="vl">' + (n || 0) + '</span></div>';
   };
   var earn = '';
@@ -759,7 +904,11 @@ function quickAlert(sym, price) {
   var live = LIVE.q && LIVE.q.price;
   var dir = (live && price > live) ? 'above' : 'below';
   saveAlert(sym, price, dir);
-  goTab('alerts');
+  haptic(12);
+  // 'alerts' is not a page - the alert list lives on the watch tab. Sending
+  // the old name here removed .on from every page and left a blank screen.
+  closeSheet();
+  goTab('watch');
 }
 
 /* ---------------------------------------------------------------- alerts */
@@ -907,7 +1056,7 @@ function renderFilters() {
       '<input id="f-' + f[0] + '-max" inputmode="decimal" placeholder="עד ' +
         f[3] + '" value="' + (v.max != null ? v.max : '') + '">' +
       '</div>' +
-      (f[4] ? '<div class="fhelp" id="h-' + f[0] + '" hidden>' +
+      (f[4] ? '<div class="fhelp" id="h-' + f[0] + '">' +
         '<b class="rng">טווח בנתונים: ' + f[2] + ' עד ' + f[3] + '</b>' +
         f[4] + '</div>' : '');
   }).join('');
@@ -1050,9 +1199,11 @@ function deleteScreen(i) {
   renderScreens();
 }
 
+/* Class rather than the hidden attribute, so the panel can expand into place
+   instead of the rows below it jumping by its full height in one frame. */
 function toggleHelp(key) {
   var el = $('#h-' + key);
-  if (el) el.hidden = !el.hidden;
+  if (el) el.classList.toggle('open');
 }
 
 function readFilters() {
@@ -1129,10 +1280,13 @@ function runScreen() {
   box.innerHTML = '<div class="card-h"><span>תוצאות</span>' +
     '<span class="sub">' + hits.length + ' מניות' +
     (hits.length > shown.length ? ' · מוצגות ' + shown.length : '') + '</span></div>' +
-    shown.map(function (r) {
+    shown.map(function (r, n) {
       var sc = r.sc ? r.sc.total : null;
       var t = r.t || {};
-      return '<button class="hit" onclick="analyze(\'' + r.s + '\')">' +
+      // Capped so a 60-row result set does not trail in for four seconds.
+      var delay = Math.min(n, 14) * 28;
+      return '<button class="hit" style="animation-delay:' + delay +
+        'ms" onclick="analyze(\'' + r.s + '\')">' +
         '<span class="hit-score" style="background:' + scoreColor(sc) +
           '22;color:' + scoreColor(sc) + '">' + (sc == null ? '—' : sc) + '</span>' +
         '<span class="hit-id">' +
@@ -1246,8 +1400,8 @@ function renderBreadth() {
     var col = v >= 60 ? 'var(--ok)' : v >= 40 ? 'var(--watch)' : 'var(--alert)';
     return '<div class="bd-row">' +
       '<span class="bd-lb">' + label + '</span>' +
-      '<span class="bd-track"><i class="bd-fill" style="width:' +
-        v.toFixed(0) + '%;background:' + col + '"></i></span>' +
+      '<span class="bd-track"><i class="bd-fill" data-w="' + v.toFixed(0) +
+        '" style="width:0;background:' + col + '"></i></span>' +
       '<span class="bd-vl">' + v.toFixed(0) + '%</span></div>';
   };
 
@@ -1262,6 +1416,7 @@ function renderBreadth() {
     bar('עלו היום', up) +
     bar('קרוב לשיא שנתי', near) +
     (tone ? '<div class="bd-sum"><b>' + tone[0] + '</b> · ' + tone[1] + '</div>' : '');
+  paintBars(el, true);
 }
 
 /* Kept as the single place that reports snapshot trouble. The card it used to
@@ -1347,6 +1502,9 @@ function openSettings() {
     '</div>';
   openSheet();
   $('.modal-sheet').scrollTop = 0;
+  // Clears the .quiet flag a previous analysis render may have left behind,
+  // which would otherwise suppress this sheet's card stagger.
+  runSheetIntro(true);
 }
 
 function refreshSnapshot() {
@@ -1412,69 +1570,170 @@ function renderSectors() {
     var col = r.v >= 0 ? 'var(--ok)' : 'var(--alert)';
     return '<div class="bd-row">' +
       '<span class="bd-lb">' + r.k + '</span>' +
-      '<span class="bd-track"><i class="bd-fill" style="width:' +
-        w.toFixed(0) + '%;background:' + col + '"></i></span>' +
+      '<span class="bd-track"><i class="bd-fill" data-w="' + w.toFixed(0) +
+        '" style="width:0;background:' + col + '"></i></span>' +
       '<span class="bd-vl" style="color:' + col + '">' + pct(r.v, 1) +
       '</span></div>';
   }).join('') +
   '<div class="bd-sum">חציון תשואת חודש בכל סקטור. ' +
     '<b>' + rows[0].k + '</b> מוביל, <b>' + rows[rows.length - 1].k +
     '</b> נחלש.</div>';
+  paintBars(el, true);
 }
 
-/* Swipe between pages. The tab bar in RTL puts שוק on the right and מעקב on
-   the left, so a flick toward a side selects the tab on that side - the
-   gesture points at what you want, which holds in either direction. */
-var TAB_ORDER = ['market', 'watch'];
-
-function currentTab() {
-  var on = document.querySelector('.tab.on');
-  return on ? on.dataset.page : TAB_ORDER[0];
-}
-
+/* Swipe between pages.
+ *
+ * The pages sit side by side on a track. In RTL the flex row starts at the
+ * right edge, so page 0 is in view and page 1 waits off-screen to the LEFT.
+ * Bringing it in means moving the track rightward - so dragging right advances
+ * and dragging left goes back. The earlier version chose the tab on the side
+ * you flicked toward, which is the opposite of this and read as inverted.
+ *
+ * The track follows the finger the whole way, so the direction is not
+ * something to remember: the page you are pulling in is already visible. */
 function enableSwipe() {
   var el = $('#pages');
-  if (!el) return;
-  var x0 = null, y0 = 0, t0 = 0;
+  var track = $('#track');
+  if (!el || !track) return;
+
+  var x0 = 0, y0 = 0, t0 = 0;
+  var axis = null;   // null until the gesture commits to one direction
+  var active = false;
+  var w = 1;
+
+  var idx = function () { return TAB_ORDER.indexOf(currentTab()); };
+
+  var settle = function (i) {
+    track.classList.remove('dragging');
+    track.style.transform = '';
+    goTab(TAB_ORDER[i], { noEnter: true });
+  };
 
   el.addEventListener('touchstart', function (e) {
-    if (e.touches.length !== 1) { x0 = null; return; }
+    if (e.touches.length !== 1 || sheetOpen()) { active = false; return; }
+    active = true; axis = null;
     x0 = e.touches[0].clientX;
     y0 = e.touches[0].clientY;
     t0 = Date.now();
+    w = el.clientWidth || 1;
   }, { passive: true });
 
-  el.addEventListener('touchend', function (e) {
-    if (x0 == null) return;
-    var t = e.changedTouches[0];
-    var dx = t.clientX - x0, dy = t.clientY - y0;
-    x0 = null;
-    if (Date.now() - t0 > 600) return;             // a drag, not a flick
-    if (Math.abs(dx) < 60) return;                 // too short to mean it
-    if (Math.abs(dy) > Math.abs(dx) * 0.7) return; // that was a scroll
-    var i = TAB_ORDER.indexOf(currentTab());
-    var next = dx < 0 ? i + 1 : i - 1;
-    if (next >= 0 && next < TAB_ORDER.length) goTab(TAB_ORDER[next]);
-  }, { passive: true });
+  el.addEventListener('touchmove', function (e) {
+    if (!active || e.touches.length !== 1) return;
+    var dx = e.touches[0].clientX - x0;
+    var dy = e.touches[0].clientY - y0;
+
+    if (axis === null) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      // Vertical scrolling is the common case, so it wins ties.
+      axis = Math.abs(dx) > Math.abs(dy) * 1.3 ? 'x' : 'y';
+      if (axis === 'x') track.classList.add('dragging');
+    }
+    if (axis !== 'x') return;
+
+    // Holds the page still instead of letting it scroll under the drag.
+    if (e.cancelable) e.preventDefault();
+
+    var i = idx();
+    var at = (i === 0 && dx < 0) || (i === TAB_ORDER.length - 1 && dx > 0);
+    // Past the ends there is nowhere to go, so the track resists rather than
+    // sliding into blank space.
+    var travel = at ? dx * 0.28 : dx;
+    track.style.transform =
+      'translateX(calc(' + (i * 100) + '% + ' + travel.toFixed(1) + 'px))';
+  }, { passive: false });
+
+  var end = function (e) {
+    if (!active) return;
+    active = false;
+    if (axis !== 'x') { axis = null; return; }
+    axis = null;
+
+    var dx = e.changedTouches[0].clientX - x0;
+    var dt = Date.now() - t0;
+    var i = idx();
+    // Either far enough, or fast enough that intent is obvious at any distance.
+    var far = Math.abs(dx) > w * 0.28;
+    var flick = dt < 320 && Math.abs(dx) > 46;
+    var next = i;
+    if (far || flick) next = dx > 0 ? i + 1 : i - 1;
+    if (next < 0 || next >= TAB_ORDER.length) next = i;
+    settle(next);
+  };
+
+  el.addEventListener('touchend', end, { passive: true });
+  el.addEventListener('touchcancel', end, { passive: true });
 }
 
+function sheetOpen() {
+  var m = $('#sheet');
+  return !!m && !m.classList.contains('hidden');
+}
+
+/* Drag the sheet down to dismiss it. The sheet tracks the finger and the
+   backdrop fades with it, so you can see how far you are from letting go -
+   and pull back if you change your mind, which a release-threshold check
+   could not offer. */
 function enableSheetSwipe() {
+  var modal = $('#sheet');
   var sheet = document.querySelector('.modal-sheet');
-  if (!sheet) return;
-  var y0 = null, st0 = 0;
+  var back = document.querySelector('.modal-backdrop');
+  if (!modal || !sheet) return;
+
+  var y0 = 0, t0 = 0, dragging = false, armed = false, fromGrip = false;
 
   sheet.addEventListener('touchstart', function (e) {
-    if (e.touches.length !== 1) { y0 = null; return; }
+    if (e.touches.length !== 1) { armed = false; return; }
     y0 = e.touches[0].clientY;
-    st0 = sheet.scrollTop;
+    t0 = Date.now();
+    fromGrip = !!(e.target.closest && e.target.closest('.sheet-grip'));
+    // Anywhere else, the content has to be scrolled to the top first, or the
+    // gesture would fight the sheet's own scrolling.
+    armed = fromGrip || sheet.scrollTop <= 0;
+    dragging = false;
   }, { passive: true });
 
-  sheet.addEventListener('touchend', function (e) {
-    if (y0 == null) return;
+  sheet.addEventListener('touchmove', function (e) {
+    if (!armed || e.touches.length !== 1) return;
+    var dy = e.touches[0].clientY - y0;
+
+    if (!dragging) {
+      if (dy < 6) return;                          // upward or too small yet
+      if (!fromGrip && sheet.scrollTop > 0) { armed = false; return; }
+      dragging = true;
+      modal.classList.add('dragging');
+    }
+    if (e.cancelable) e.preventDefault();
+
+    // Upward past the top is resisted; the sheet has nowhere higher to go.
+    var travel = dy < 0 ? dy * 0.2 : dy;
+    sheet.style.transform = 'translateY(' + travel.toFixed(1) + 'px)';
+    if (back) {
+      var h = sheet.offsetHeight || 1;
+      back.style.opacity = Math.max(0, 1 - (travel / h) * 1.1).toFixed(3);
+    }
+  }, { passive: false });
+
+  var end = function (e) {
+    if (!armed) return;
+    armed = false;
+    if (!dragging) return;
+    dragging = false;
+    modal.classList.remove('dragging');
+    if (back) back.style.opacity = '';
+
     var dy = e.changedTouches[0].clientY - y0;
-    y0 = null;
-    if (dy > 80 && st0 <= 0) closeSheet();
-  }, { passive: true });
+    var dt = Date.now() - t0;
+    var h = sheet.offsetHeight || 1;
+    if (dy > h * 0.3 || (dt < 300 && dy > 70)) {
+      closeSheet();
+    } else {
+      sheet.style.transform = '';                  // springs back
+    }
+  };
+
+  sheet.addEventListener('touchend', end, { passive: true });
+  sheet.addEventListener('touchcancel', end, { passive: true });
 }
 
 function greet() {
@@ -1516,6 +1775,8 @@ function boot() {
   $('#greet').textContent = greet();
   enableSwipe();
   enableSheetSwipe();
+  goTab('market', { silent: true });
+  playEnter($('#p-market'));
   renderFilters();
   loadTickers();
   loadSnapshot().then(function () {
