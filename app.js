@@ -43,7 +43,11 @@ var LS = {
   /* A GitHub token, so the app can write the alert list into the repo the
      scheduled checker reads. It stays on this device and is never sent
      anywhere but api.github.com. */
-  gh: 'sa_gh'
+  gh: 'sa_gh',
+  /* Set the moment an alert changes and cleared once the change reaches
+     GitHub. Without it a copy that failed to push would silently adopt the
+     older remote list on the next open and lose the change. */
+  dirty: 'sa_dirty'
 };
 
 var store = {
@@ -1837,11 +1841,13 @@ function syncAlerts() {
       // Nothing to say to GitHub if the file already matches; this also keeps
       // a re-opened settings sheet from making an empty commit.
       if (cur.text != null && cur.text.trim() === want.trim()) {
+        store.set(LS.dirty, false);
         SYNC = { state: 'ok', msg: 'מסונכרן' };
         paintSync();
         return true;
       }
       return ghPut(token, want, cur.sha).then(function () {
+        store.set(LS.dirty, false);
         SYNC = { state: 'ok', msg: 'סונכרן ' + nowHM() };
         paintSync();
         return true;
@@ -1863,10 +1869,63 @@ function nowHM() {
     { hour: '2-digit', minute: '2-digit' });
 }
 
+/* Adopts the list from the repo.
+ *
+ * This runs on open, and pushing there instead was a real bug: any copy of the
+ * app that opened holding an older list would overwrite the repo with it, so
+ * an alert added on one device was reverted seconds later by another. The repo
+ * is the shared copy and the one the checker reads, so it wins - which also
+ * means an alert added on the phone now shows up everywhere else. A local
+ * change that has not reached GitHub yet is marked dirty and pushed instead,
+ * so nothing made offline is thrown away. */
+function pullAlerts() {
+  var token = ghToken();
+  if (!token) return Promise.resolve(false);
+
+  SYNC = { state: 'syncing' }; paintSync();
+  return ghGet(token).then(function (cur) {
+    if (cur.text == null) {          // no file yet: local is all there is
+      return syncAlerts();
+    }
+    var remote;
+    try { remote = JSON.parse(cur.text); }
+    catch (e) { throw new Error('הקובץ ב־GitHub לא תקין'); }
+
+    var list = (remote && remote.alerts) || [];
+    var clean = [];
+    for (var i = 0; i < list.length; i++) {
+      var a = list[i];
+      if (!a || !a.s) continue;
+      var p = parseFloat(a.p);
+      if (isNaN(p) || p <= 0) continue;
+      if (a.d !== 'above' && a.d !== 'below') continue;
+      clean.push({ s: String(a.s).toUpperCase(), d: a.d, p: p, t: Date.now() });
+    }
+
+    var before = alertsSyncJson();
+    store.set(LS.alerts, clean);
+    store.set(LS.dirty, false);
+    if (alertsSyncJson() !== before) {
+      renderAlerts();
+      checkAlerts(false);
+    }
+    SYNC = { state: 'ok', msg: 'מסונכרן' };
+    paintSync();
+    return true;
+  }).catch(function (e) {
+    SYNC = { state: 'err', msg: e.message };
+    paintSync();
+    return false;
+  });
+}
+
 /* Adding three alerts in a row should be one commit, not three. */
 var syncTimer = null;
 function queueSync() {
   if (!ghToken()) return;
+  // Marked before the debounce, so a copy closed mid-wait still knows on the
+  // next open that it holds a change GitHub has not seen.
+  store.set(LS.dirty, true);
   clearTimeout(syncTimer);
   syncTimer = setTimeout(function () { syncAlerts(); }, 1200);
 }
@@ -2229,9 +2288,12 @@ function boot() {
     renderEarningsSoon();
     checkAlerts(false);
   });
-  // Repairs drift: if a sync failed while the phone was offline, the repo is
-  // brought back in line the next time the app opens.
-  if (ghToken()) syncAlerts();
+  // Pull, not push: pushing here let a copy holding an older list overwrite
+  // the repo on open. Only an unsent local change pushes instead.
+  if (ghToken()) {
+    if (store.get(LS.dirty, false)) syncAlerts();
+    else pullAlerts();
+  }
 }
 
 if (document.readyState === 'loading') {
