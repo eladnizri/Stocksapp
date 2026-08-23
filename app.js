@@ -39,7 +39,11 @@ var LS = {
   proxy: 'sa_proxy',
   recent: 'sa_recent',
   screens: 'sa_screens',
-  sectors: 'sa_sectors'
+  sectors: 'sa_sectors',
+  /* A GitHub token, so the app can write the alert list into the repo the
+     scheduled checker reads. It stays on this device and is never sent
+     anywhere but api.github.com. */
+  gh: 'sa_gh'
 };
 
 var store = {
@@ -925,6 +929,7 @@ function saveAlert(sym, price, dir) {
   store.set(LS.alerts, list);
   renderAlerts();
   checkAlerts(true);
+  queueSync();
 }
 
 function addAlert() {
@@ -946,6 +951,7 @@ function removeAlert(i) {
   list.splice(i, 1);
   store.set(LS.alerts, list);
   renderAlerts();
+  queueSync();
 }
 
 /* Last known price per alerted symbol. Seeded from the snapshot so a row
@@ -1644,6 +1650,7 @@ function openSettings() {
   // Clears the .quiet flag a previous analysis render may have left behind,
   // which would otherwise suppress this sheet's card stagger.
   runSheetIntro(true);
+  paintSync();
 }
 
 /* Getting the alerts off the phone.
@@ -1701,19 +1708,241 @@ function selectAlertsJson() {
   }
 }
 
+/* ------------------------------------------------- automatic sync ------ */
+/* With a token present the app writes data/alerts.json itself, so adding an
+   alert is the whole job and nothing has to be pasted anywhere. The token is
+   the user's own, lives only in this browser, and is never committed - a
+   public page cannot hold a shared secret, so a per-device token is the only
+   shape this can take without a server. */
+var GH_REPO = 'eladnizri/Stocksapp';
+var GH_PATH = 'data/alerts.json';
+var GH_REPO_API = 'https://api.github.com/repos/' + GH_REPO;
+var GH_API = GH_REPO_API + '/contents/' + GH_PATH;
+var GH_TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new';
+
+function ghToken() { return store.get(LS.gh, '') || ''; }
+
+/* btoa is byte-oriented and throws on anything outside latin-1. The payload
+   is ASCII today, but a symbol is user input and need not stay that way. */
+function b64encode(str) {
+  var bytes = new TextEncoder().encode(str);
+  var out = '';
+  for (var i = 0; i < bytes.length; i++) out += String.fromCharCode(bytes[i]);
+  return btoa(out);
+}
+function b64decode(b64) {
+  var bin = atob((b64 || '').replace(/\s/g, ''));
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+function ghHeaders(token) {
+  return {
+    'Authorization': 'Bearer ' + token,
+    'Accept': 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28'
+  };
+}
+
+/* GitHub's status codes each mean something specific and actionable here, so
+   they are translated rather than surfaced as a bare number. */
+function ghError(status) {
+  var m =
+    status === 401 ? 'הטוקן לא תקף או שפג תוקפו' :
+    status === 403 ? 'לטוקן אין הרשאת כתיבה (Contents: read and write)' :
+    status === 404 ? 'ה־repo לא נמצא — ודא שהטוקן משויך ל־Stocksapp' :
+    status === 409 ? 'הקובץ השתנה בינתיים' :
+    status === 422 ? 'GitHub דחה את התוכן' :
+    'שגיאה מ־GitHub (' + status + ')';
+  var e = new Error(m);
+  e.status = status;
+  return e;
+}
+
+function ghGet(token) {
+  return fetch(GH_API + '?t=' + Date.now(),
+               { headers: ghHeaders(token), cache: 'no-store' })
+    .then(function (r) {
+      // A missing file is a normal first-run state, not a failure.
+      if (r.status === 404) return { sha: null, text: null, missing: true };
+      if (!r.ok) throw ghError(r.status);
+      return r.json().then(function (d) {
+        return { sha: d.sha, text: b64decode(d.content || '') };
+      });
+    });
+}
+
+/* Checks a token against the repository itself rather than the alerts file.
+   GitHub answers 404 both for a file that does not exist yet and for a repo
+   the token cannot see, so verifying against the file would accept a token
+   scoped to the wrong repository. The repo endpoint has no such ambiguity. */
+function ghVerify(token) {
+  return fetch(GH_REPO_API + '?t=' + Date.now(),
+               { headers: ghHeaders(token), cache: 'no-store' })
+    .then(function (r) {
+      if (!r.ok) throw ghError(r.status);
+      return r.json();
+    })
+    .then(function (d) {
+      // Present for fine-grained tokens; absent rather than false when the
+      // API does not report it, so this only rejects a definite "no".
+      if (d && d.permissions && d.permissions.push === false) {
+        throw ghError(403);
+      }
+      return true;
+    });
+}
+
+function ghPut(token, text, sha) {
+  var body = { message: 'Update alerts from the app', content: b64encode(text) };
+  if (sha) body.sha = sha;
+  return fetch(GH_API, {
+    method: 'PUT', headers: ghHeaders(token), body: JSON.stringify(body)
+  }).then(function (r) {
+    if (!r.ok) throw ghError(r.status);
+    return r.json();
+  });
+}
+
+var SYNC = { state: 'none', msg: '' };   // none | syncing | ok | err
+
+function paintSync() {
+  var map = {
+    none: ['', ''],
+    syncing: ['מסנכרן…', 'var(--ink-2)'],
+    ok: [SYNC.msg || 'מסונכרן', 'var(--primary-500)'],
+    err: [SYNC.msg || 'הסנכרון נכשל', 'var(--alert)']
+  };
+  var v = map[SYNC.state] || ['', ''];
+  ['#syncState', '#syncStateWatch'].forEach(function (sel) {
+    var el = $(sel);
+    if (!el) return;
+    el.textContent = v[0];
+    el.style.color = v[1];
+  });
+}
+
+/* Writes the current alert list to the repo. Resolves false when there is no
+   token, which is the signal to fall back to copy and paste. */
+function syncAlerts() {
+  var token = ghToken();
+  if (!token) { SYNC = { state: 'none' }; paintSync(); return Promise.resolve(false); }
+
+  var want = alertsSyncJson() + '\n';
+  SYNC = { state: 'syncing' }; paintSync();
+
+  var attempt = function (isRetry) {
+    return ghGet(token).then(function (cur) {
+      // Nothing to say to GitHub if the file already matches; this also keeps
+      // a re-opened settings sheet from making an empty commit.
+      if (cur.text != null && cur.text.trim() === want.trim()) {
+        SYNC = { state: 'ok', msg: 'מסונכרן' };
+        paintSync();
+        return true;
+      }
+      return ghPut(token, want, cur.sha).then(function () {
+        SYNC = { state: 'ok', msg: 'סונכרן ' + nowHM() };
+        paintSync();
+        return true;
+      });
+    }).catch(function (e) {
+      // Someone else wrote the file between the read and the write; the
+      // second pass picks up the new sha.
+      if (e.status === 409 && !isRetry) return attempt(true);
+      SYNC = { state: 'err', msg: e.message };
+      paintSync();
+      return false;
+    });
+  };
+  return attempt(false);
+}
+
+function nowHM() {
+  return new Date().toLocaleTimeString('he-IL',
+    { hour: '2-digit', minute: '2-digit' });
+}
+
+/* Adding three alerts in a row should be one commit, not three. */
+var syncTimer = null;
+function queueSync() {
+  if (!ghToken()) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(function () { syncAlerts(); }, 1200);
+}
+
+function saveGhToken() {
+  var el = $('#ghTok');
+  var note = $('#ghNote');
+  var v = (el && el.value || '').trim();
+  if (!v) return;
+  if (note) { note.textContent = 'בודק את הטוקן…'; note.style.color = 'var(--ink-2)'; }
+  // Verified before it is stored, so a bad paste is caught here rather than
+  // silently failing on the next alert.
+  ghVerify(v).then(function () {
+    store.set(LS.gh, v);
+    haptic(12);
+    return syncAlerts();
+  }).then(function () {
+    openSettings();
+  }).catch(function (e) {
+    if (note) { note.textContent = e.message; note.style.color = 'var(--alert)'; }
+  });
+}
+
+function clearGhToken() {
+  store.set(LS.gh, '');
+  SYNC = { state: 'none' };
+  openSettings();
+}
+
 function renderAlertsSync() {
   var n = store.get(LS.alerts, []).length;
-  return '<div class="card">' +
-    '<div class="card-h"><span>סנכרון התראות</span>' +
-      '<span class="sub">' + n + ' מוגדרות</span></div>' +
-    '<div class="score-note" style="margin-bottom:10px">ההתראות נשמרות ' +
-      'במכשיר בלבד, ולכן נבדקות רק כשהאפליקציה פתוחה. כדי שיגיעו גם כשהיא ' +
-      'סגורה, העתק את הרשימה והדבק אותה בקובץ ' +
-      '<b>data/alerts.json</b> ב־GitHub. צריך לעשות זאת רק כשמשנים ' +
-      'את רשימת ההתראות.</div>' +
+  var connected = !!ghToken();
+
+  var head = '<div class="card-h"><span>סנכרון התראות</span>' +
+    '<span class="sub" id="syncState"></span></div>';
+
+  if (connected) {
+    return '<div class="card">' + head +
+      '<div class="score-note" style="margin-bottom:11px">מחובר ל־GitHub. ' +
+        n + ' התראות נכתבות אוטומטית ל־<b>data/alerts.json</b> בכל שינוי, ' +
+        'ונבדקות כל 15 דקות בשעות המסחר — גם כשהאפליקציה סגורה.</div>' +
+      '<div class="frow">' +
+        '<button class="btn" onclick="syncAlerts()">סנכרן עכשיו</button>' +
+        '<button class="btn ghost" style="max-width:110px" ' +
+          'onclick="clearGhToken()">נתק</button>' +
+      '</div>' +
+      '<div class="score-note" style="margin-top:9px">הטוקן שמור במכשיר הזה ' +
+        'בלבד. ניתוק מוחק אותו מכאן — לביטול מלא בטל אותו גם ב־GitHub.</div>' +
+      '</div>';
+  }
+
+  return '<div class="card">' + head +
+    '<div class="score-note" style="margin-bottom:10px">כרגע ההתראות נשמרות ' +
+      'במכשיר בלבד, ולכן נבדקות רק כשהאפליקציה פתוחה. חבר טוקן פעם אחת ' +
+      'והרשימה תיכתב ל־GitHub לבד בכל שינוי.</div>' +
+    '<div class="frow" style="margin-bottom:4px">' +
+      '<input id="ghTok" type="password" autocomplete="off" ' +
+        'autocapitalize="off" autocorrect="off" spellcheck="false" ' +
+        'placeholder="github_pat_…">' +
+    '</div>' +
+    '<div class="frow">' +
+      '<button class="btn" onclick="saveGhToken()">חבר</button>' +
+      '<a class="btn ghost" href="' + GH_TOKEN_URL + '" target="_blank" ' +
+        'rel="noopener" style="text-align:center">צור טוקן</a>' +
+    '</div>' +
+    '<div class="score-note" id="ghNote" style="margin-top:8px"></div>' +
+    '<div class="fhelp open" style="margin-top:11px">' +
+      '<b class="rng">איך מייצרים</b>' +
+      'ב־GitHub: Fine-grained token ← Repository access ← <b>Only select ' +
+      'repositories</b> ← Stocksapp ← Permissions ← Repository permissions ← ' +
+      '<b>Contents: Read and write</b>. הטוקן נשמר במכשיר הזה בלבד ואפשר ' +
+      'לבטל אותו ב־GitHub בכל רגע.</div>' +
+    '<div class="score-note" style="margin:13px 0 8px">או ידנית, בלי טוקן:</div>' +
     '<pre class="sync-box" id="syncBox">' + esc(alertsSyncJson()) + '</pre>' +
     '<div class="frow" style="margin-top:11px">' +
-      '<button class="btn" onclick="copyAlertsJson()">העתק</button>' +
+      '<button class="btn ghost" onclick="copyAlertsJson()">העתק</button>' +
       '<a class="btn ghost" href="' + REPO_EDIT_URL + '" target="_blank" ' +
         'rel="noopener" style="text-align:center">פתח ב־GitHub</a>' +
     '</div>' +
@@ -2000,6 +2229,9 @@ function boot() {
     renderEarningsSoon();
     checkAlerts(false);
   });
+  // Repairs drift: if a sync failed while the phone was offline, the repo is
+  // brought back in line the next time the app opens.
+  if (ghToken()) syncAlerts();
 }
 
 if (document.readyState === 'loading') {
