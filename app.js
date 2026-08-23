@@ -203,7 +203,7 @@ function useSnapshot(d, isCache) {
 }
 
 /* ------------------------------------------------------------ navigation */
-var TAB_ORDER = ['market', 'watch', 'trades'];
+var TAB_ORDER = ['home', 'market', 'watch', 'trades'];
 
 function reduced() {
   try {
@@ -297,8 +297,9 @@ function goTab(name, opts) {
 
   if (name === 'watch') { renderAlerts(); checkAlerts(false); renderFilters(); }
   if (name === 'trades') { renderTrades(); }
+  if (name === 'home') { renderHome(); }
   if (name === 'market') {
-    loadTickers(); renderBreadth(); renderSectors();
+    renderBreadth(); renderSectors();
     renderChanges(); renderEarningsSoon();
   }
 }
@@ -1016,7 +1017,12 @@ function checkAlerts(force) {
       renderAlerts();
     }
     yahooQuote(sym).then(function (q) {
-      if (q && q.price != null) { ALERT_PRICES[sym] = q.price; renderAlerts(); }
+      if (q && q.price != null) {
+        ALERT_PRICES[sym] = q.price;
+        renderAlerts();
+        // The same price drives the trade cards' R and rail position.
+        paintTrades();
+      }
     }).catch(function () {});
   });
 }
@@ -1292,79 +1298,112 @@ function tradeR(t, price) {
   return (price - t.entry) / risk;
 }
 
+function tradePrice(t) {
+  var price = ALERT_PRICES[t.s];
+  if (price == null) {
+    var snap = SNAP_BY_SYM[t.s];
+    if (snap && snap.t) price = snap.t.price;
+  }
+  return price;
+}
+
+/* One card, rendered the same on the home screen and on the trades tab. */
+function tradeCardHtml(t) {
+  var price = tradePrice(t);
+  var r = tradeR(t, price);
+  var risk = t.entry - t.stop;
+  var pl = (price != null && t.qty) ? (price - t.entry) * t.qty : null;
+
+  // Position on the stop..target rail, in physical left-to-right space.
+  var lo = t.stop, hi = t.target || (t.entry + risk * TRADE_RR);
+  var pos = price == null ? null
+    : Math.max(0, Math.min(100, ((price - lo) / (hi - lo)) * 100));
+  var entryPos = Math.max(0, Math.min(100, ((t.entry - lo) / (hi - lo)) * 100));
+
+  var toStop = price != null ? ((t.stop - price) / price) * 100 : null;
+  var toTgt = (price != null && t.target)
+    ? ((t.target - price) / price) * 100 : null;
+
+  var bad = tradeGuard(t.s, t.entry, t.stop, t.target)
+    .filter(function (x) { return x[0] === 'bad'; });
+
+  return '<div class="trade">' +
+    '<div class="tr-top">' +
+      '<button class="tr-sym" onclick="analyze(\'' + esc(t.s) + '\')">' +
+        esc(t.s) + '</button>' +
+      '<span class="tr-r ' + cls(r) + '">' +
+        (r == null ? '—' : (r > 0 ? '+' : '') + num(r, 2) + 'R') + '</span>' +
+      '<button class="tr-x" onclick="deleteTrade(' + t.id +
+        ')" aria-label="מחק">✕</button>' +
+    '</div>' +
+    '<div class="tr-now">' +
+      '<span class="pr">' + (price == null ? '…' : money(price)) + '</span>' +
+      (pl != null ? '<span class="pl ' + cls(pl) + '">' +
+        (pl > 0 ? '+' : '') + money(pl) + '</span>' : '') +
+    '</div>' +
+    '<div class="rail">' +
+      '<i class="rail-fill" style="width:' + (pos == null ? 0 : pos) + '%"></i>' +
+      '<i class="rail-entry" style="left:' + entryPos + '%"></i>' +
+      (pos == null ? '' : '<i class="rail-now" style="left:' + pos + '%"></i>') +
+    '</div>' +
+    '<div class="rail-lb">' +
+      '<span>סטופ ' + money(t.stop) +
+        (toStop != null ? ' · ' + num(toStop, 1) + '%' : '') + '</span>' +
+      '<span>' + (t.target ? 'יעד ' + money(t.target) +
+        (toTgt != null ? ' · +' + num(toTgt, 1) + '%' : '') : 'ללא יעד') +
+      '</span>' +
+    '</div>' +
+    '<div class="tr-meta">כניסה ' + money(t.entry) +
+      (t.qty ? ' · ' + t.qty + ' מניות · סיכון ' + money(risk * t.qty) : '') +
+      ' · ' + esc(t.opened) + '</div>' +
+    (bad.length ? guardHtml(bad) : '') +
+    '<button class="btn ghost" style="margin-top:9px" onclick="closeTrade(' +
+      t.id + ')">סגור עסקה</button>' +
+    '</div>';
+}
+
+/* Paints both lists and nothing else.
+ *
+ * Kept free of side effects on purpose: a live quote arriving has to repaint
+ * the cards, and if painting also fetched, that would loop. */
+function paintTrades() {
+  var open = openTrades();
+  var cards = open.length ? open.map(tradeCardHtml).join('') : null;
+
+  var hb = $('#homeTrades');
+  if (hb) {
+    hb.innerHTML = cards ||
+      '<div class="msg">אין עסקאות פתוחות. ' +
+      '<button class="chip" style="margin-top:8px" onclick="goTab(\'trades\')">' +
+      'פתח סטאפ</button></div>';
+  }
+  var hc = $('#homeTradeCount');
+  if (hc) hc.textContent = open.length ? open.length + ' פתוחות' : '';
+
+  var tb = $('#tradesList');
+  if (tb) {
+    tb.innerHTML = cards ||
+      '<div class="msg">אין עסקאות פתוחות. הזן סימבול ומחיר כניסה למעלה — ' +
+      'הסטופ והיעד יוצעו לפי ATR.</div>';
+  }
+  var tc = $('#tradeCount');
+  if (tc) tc.textContent = open.length ? open.length + ' פתוחות' : '';
+}
+
+/* The home screen: indices and the trades you are in, nothing else. */
+function renderHome() {
+  loadTickers();
+  paintTrades();
+  if (openTrades().length) checkAlerts(false);
+}
+
 function renderTrades() {
   paintRiskNote();
   var c = riskCfg();
   if ($('#r-acct') && !$('#r-acct').value && c.acct) $('#r-acct').value = c.acct;
   if ($('#r-pct') && !$('#r-pct').value && c.pct != null) $('#r-pct').value = c.pct;
 
-  var open = openTrades();
-  var box = $('#tradesList');
-  $('#tradeCount').textContent = open.length ? open.length + ' פתוחות' : '';
-
-  if (!open.length) {
-    box.innerHTML = '<div class="msg">אין עסקאות פתוחות. הזן סימבול ומחיר ' +
-      'כניסה למעלה — הסטופ והיעד יוצעו לפי ATR.</div>';
-  } else {
-    box.innerHTML = open.map(function (t) {
-      var price = ALERT_PRICES[t.s];
-      if (price == null) {
-        var snap = SNAP_BY_SYM[t.s];
-        if (snap && snap.t) price = snap.t.price;
-      }
-      var r = tradeR(t, price);
-      var risk = t.entry - t.stop;
-      var pl = (price != null && t.qty) ? (price - t.entry) * t.qty : null;
-
-      // Position on the stop..target rail, in physical left-to-right space.
-      var lo = t.stop, hi = t.target || (t.entry + risk * TRADE_RR);
-      var pos = price == null ? null
-        : Math.max(0, Math.min(100, ((price - lo) / (hi - lo)) * 100));
-      var entryPos = Math.max(0, Math.min(100, ((t.entry - lo) / (hi - lo)) * 100));
-
-      var toStop = price != null ? ((t.stop - price) / price) * 100 : null;
-      var toTgt = (price != null && t.target)
-        ? ((t.target - price) / price) * 100 : null;
-
-      var g = tradeGuard(t.s, t.entry, t.stop, t.target);
-      var bad = g.filter(function (x) { return x[0] === 'bad'; });
-
-      return '<div class="trade">' +
-        '<div class="tr-top">' +
-          '<button class="tr-sym" onclick="analyze(\'' + esc(t.s) + '\')">' +
-            esc(t.s) + '</button>' +
-          '<span class="tr-r ' + cls(r) + '">' +
-            (r == null ? '—' : (r > 0 ? '+' : '') + num(r, 2) + 'R') + '</span>' +
-          '<button class="tr-x" onclick="deleteTrade(' + t.id +
-            ')" aria-label="מחק">✕</button>' +
-        '</div>' +
-        '<div class="tr-now">' +
-          '<span class="pr">' + (price == null ? '…' : money(price)) + '</span>' +
-          (pl != null ? '<span class="pl ' + cls(pl) + '">' +
-            (pl > 0 ? '+' : '') + money(pl) + '</span>' : '') +
-        '</div>' +
-        '<div class="rail">' +
-          '<i class="rail-fill" style="width:' + (pos == null ? 0 : pos) + '%"></i>' +
-          '<i class="rail-entry" style="left:' + entryPos + '%"></i>' +
-          (pos == null ? '' : '<i class="rail-now" style="left:' + pos + '%"></i>') +
-        '</div>' +
-        '<div class="rail-lb">' +
-          '<span>סטופ ' + money(t.stop) +
-            (toStop != null ? ' · ' + num(toStop, 1) + '%' : '') + '</span>' +
-          '<span>' + (t.target ? 'יעד ' + money(t.target) +
-            (toTgt != null ? ' · +' + num(toTgt, 1) + '%' : '') : 'ללא יעד') +
-          '</span>' +
-        '</div>' +
-        '<div class="tr-meta">כניסה ' + money(t.entry) +
-          (t.qty ? ' · ' + t.qty + ' מניות · סיכון ' + money(risk * t.qty) : '') +
-          ' · ' + esc(t.opened) + '</div>' +
-        (bad.length ? guardHtml(bad) : '') +
-        '<button class="btn ghost" style="margin-top:9px" onclick="closeTrade(' +
-          t.id + ')">סגור עסקה</button>' +
-        '</div>';
-    }).join('');
-  }
-
+  paintTrades();
   renderJournal();
   // Open trades need a live price even when the alerts card is not on screen.
   checkAlerts(false);
@@ -2667,15 +2706,18 @@ function boot() {
   $('#greet').textContent = greet();
   enableSwipe();
   enableSheetSwipe();
-  goTab('market', { silent: true });
-  playEnter($('#p-market'));
+  goTab('home', { silent: true });
+  playEnter($('#p-home'));
   renderFilters();
-  loadTickers();
+  renderHome();
   loadSnapshot().then(function () {
     renderBreadth();
     renderSectors();
     renderChanges();
     renderEarningsSoon();
+    // Needs the snapshot: an open trade falls back to the snapshot price
+    // until a live quote lands, and the guard reads ATR and earnings from it.
+    renderHome();
     checkAlerts(false);
   });
   // Pull, not push: pushing here let a copy holding an older list overwrite

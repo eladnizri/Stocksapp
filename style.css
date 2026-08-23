@@ -799,8 +799,8 @@ a.btn { display: block; text-decoration: none; }
 
 /* --------------------------------------------------------------- tabbar */
 .tabbar {
-  display: grid; grid-template-columns: repeat(3, 1fr);
-  --tab-n: 3;
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  --tab-n: 4;
   background: linear-gradient(180deg, rgba(240, 247, 242, .74), rgba(240, 247, 242, .96));
   backdrop-filter: saturate(160%) blur(16px);
   -webkit-backdrop-filter: saturate(160%) blur(16px);
