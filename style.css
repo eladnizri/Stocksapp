@@ -589,6 +589,82 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .hit .d.up { color: var(--gain); }
 .hit .d.down { color: var(--loss); }
 
+/* ------------------------------------------------------- what changed */
+.chg-b { margin-bottom: 13px; }
+.chg-b:last-child { margin-bottom: 0; }
+.chg-t {
+  font-size: .74rem; font-weight: 700; color: var(--ink-2);
+  margin-bottom: 7px; display: flex; align-items: center; gap: 6px;
+}
+/* A dot carries the direction, so the heading does not have to say it twice. */
+.chg-t::before {
+  content: ''; width: 7px; height: 7px; border-radius: 999px;
+  background: var(--muted); flex: none;
+}
+.chg-b.up .chg-t::before { background: var(--gain); }
+.chg-b.down .chg-t::before { background: var(--loss); }
+
+.chg-rows { display: flex; flex-direction: column; gap: 6px; }
+.chg-r {
+  display: grid; grid-template-columns: 1fr auto auto;
+  align-items: center; gap: 10px;
+  padding: 9px 11px; border-radius: var(--r-sm);
+  background: var(--surface-2); width: 100%; text-align: start;
+  transition: background .16s, transform .12s;
+}
+.chg-r:active { background: var(--primary-soft); transform: scale(.98); }
+.chg-r .sym { font-weight: 800; font-size: .86rem; }
+.chg-r .mv {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: .8rem; font-weight: 700;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.chg-r .mv .a { color: var(--muted); }
+.chg-r .mv .ar { color: var(--muted); font-size: .7rem; }
+.chg-r .dl {
+  font-size: .78rem; font-weight: 800; min-width: 34px; text-align: end;
+  font-variant-numeric: tabular-nums; direction: ltr; unicode-bidi: isolate;
+}
+.chg-r .dl.up { color: var(--gain); }
+.chg-r .dl.down { color: var(--loss); }
+
+/* ------------------------------------------------------ earnings soon */
+.ern {
+  display: grid; grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center; gap: 11px;
+  padding: 10px 12px; border-radius: var(--r-md);
+  background: var(--surface-2); margin-bottom: 8px;
+  width: 100%; text-align: start;
+  transition: background .16s, transform .12s;
+}
+.ern:last-child { margin-bottom: 0; }
+.ern:active { background: var(--primary-soft); transform: scale(.98); }
+.ern-d {
+  width: 44px; height: 44px; border-radius: 12px; flex: none;
+  display: grid; place-items: center; align-content: center;
+  background: var(--surface); line-height: 1.05;
+}
+.ern-d b {
+  font-size: 1.05rem; font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.ern-d i { font-style: normal; font-size: .6rem; color: var(--muted); }
+/* Today and tomorrow are the ones worth reacting to. */
+.ern-d.soon { background: rgba(207, 138, 31, .16); }
+.ern-d.soon b { color: #a06a12; }
+.ern-id { min-width: 0; }
+.ern-id > span { display: block; }
+.ern .sym { font-weight: 800; font-size: .88rem; }
+.ern .nm, .ern .mini {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ern .nm { font-size: .72rem; color: var(--ink-2); }
+.ern .mini { font-size: .68rem; color: var(--muted); margin-top: 1px; }
+.ern-sc {
+  font-size: .92rem; font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---------------------------------------------------------------- states */
 .msg {
   font-size: .84rem; color: var(--ink-2); line-height: 1.6;

@@ -286,7 +286,10 @@ function goTab(name, opts) {
   }
 
   if (name === 'watch') { renderAlerts(); checkAlerts(false); renderFilters(); }
-  if (name === 'market') { loadTickers(); renderBreadth(); renderSectors(); }
+  if (name === 'market') {
+    loadTickers(); renderBreadth(); renderSectors();
+    renderChanges(); renderEarningsSoon();
+  }
 }
 
 function currentTab() {
@@ -553,7 +556,11 @@ function earningsLine(er) {
       '<span class="earn-v" style="color:var(--muted);font-weight:600">' +
       'טרם פורסם</span></div>';
   }
-  var days = Math.round((d - new Date()) / 86400000);
+  // Measured from midnight, not from now, so "מחר" does not become "היום"
+  // late in the evening or "בעוד יומיים" early in the morning.
+  var midnight = new Date();
+  midnight.setHours(0, 0, 0, 0);
+  var days = Math.floor((d - midnight) / 86400000);
   var when = days < 0 ? '' : days === 0 ? 'היום'
     : days === 1 ? 'מחר' : 'בעוד ' + days + ' ימים';
   var slot = er.t === 'pre' ? 'לפני הפתיחה'
@@ -1419,6 +1426,137 @@ function renderBreadth() {
   paintBars(el, true);
 }
 
+/* What moved since the previous nightly run.
+
+   The diff itself is computed by the build job, which is the only place that
+   ever holds two snapshots at once - the device only has today's. */
+function renderChanges() {
+  var el = $('#changes');
+  var since = $('#chgSince');
+  if (!el) return;
+  if (!SNAP) { el.innerHTML = '<div class="msg">טוען…</div>'; return; }
+
+  var c = SNAP.changes;
+  if (!c) {
+    if (since) since.textContent = '';
+    el.innerHTML = '<div class="msg">ההשוואה תופיע אחרי הסריקה הבאה — ' +
+      'צריך שתי סריקות כדי לדעת מה השתנה.</div>';
+    return;
+  }
+  if (since && c.since) {
+    since.textContent = 'מאז ' + new Date(c.since).toLocaleDateString('he-IL',
+      { day: 'numeric', month: 'short' });
+  }
+
+  var chips = function (list) {
+    return '<div class="chips">' + list.map(function (s) {
+      return '<button class="chip" onclick="analyze(\'' + esc(s) + '\')">' +
+        esc(s) + '</button>';
+    }).join('') + '</div>';
+  };
+
+  var block = function (title, body, tone) {
+    return '<div class="chg-b' + (tone ? ' ' + tone : '') + '">' +
+      '<div class="chg-t">' + title + '</div>' + body + '</div>';
+  };
+
+  var out = '';
+
+  if (c.score && c.score.length) {
+    out += block('שינויי ציון', '<div class="chg-rows">' +
+      c.score.map(function (m) {
+        var d = m.b - m.a;
+        return '<button class="chg-r" onclick="analyze(\'' + esc(m.s) + '\')">' +
+          '<span class="sym">' + esc(m.s) + '</span>' +
+          // The span is direction:ltr, so these lay out old, arrow, new from
+          // the left - the arrow has to point right to read old -> new.
+          '<span class="mv"><span class="a">' + m.a + '</span>' +
+            '<span class="ar">→</span>' +
+            '<span class="b" style="color:' + scoreColor(m.b) + '">' + m.b +
+            '</span></span>' +
+          '<span class="dl ' + cls(d) + '">' + (d > 0 ? '+' : '') + d +
+          '</span></button>';
+      }).join('') + '</div>');
+  }
+
+  if (c.maUp && c.maUp.length) {
+    out += block('חצו מעל ממוצע 200', chips(c.maUp), 'up');
+  }
+  if (c.maDown && c.maDown.length) {
+    out += block('חצו מתחת לממוצע 200', chips(c.maDown), 'down');
+  }
+  if (c.hi52 && c.hi52.length) {
+    out += block('שיא 52 שבועות חדש', chips(c.hi52), 'up');
+  }
+  if (c.lo52 && c.lo52.length) {
+    out += block('שפל 52 שבועות חדש', chips(c.lo52), 'down');
+  }
+
+  el.innerHTML = out ||
+    '<div class="msg">אין שינויים בולטים מאז הסריקה הקודמת.</div>';
+}
+
+/* Reports due in the next week, from dates already in the snapshot. */
+function renderEarningsSoon(days) {
+  var el = $('#earnSoon');
+  if (!el) return;
+  if (!SNAP) { el.innerHTML = '<div class="msg">טוען…</div>'; return; }
+  days = days || 7;
+
+  var today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  var list = [];
+  SNAP.rows.forEach(function (r) {
+    if (!r.er || !r.er.d) return;
+    var d = new Date(r.er.d + 'T12:00:00');
+    if (isNaN(d)) return;
+    // The report date is anchored at noon to dodge DST, so the gap from
+    // midnight today is always X.5 days - rounding turns tomorrow into two
+    // days away. Floor is what counts whole days here.
+    var n = Math.floor((d - today) / 86400000);
+    if (n < 0 || n > days) return;
+    list.push({ r: r, d: d, n: n });
+  });
+
+  if (!list.length) {
+    el.innerHTML = '<div class="msg">אין דוחות מתוכננים בשבוע הקרוב ' +
+      'מבין המניות הנסרקות.</div>';
+    return;
+  }
+  list.sort(function (a, b) {
+    if (a.n !== b.n) return a.n - b.n;
+    return (b.r.mcap || 0) - (a.r.mcap || 0);
+  });
+
+  var when = function (n) {
+    return n === 0 ? 'היום' : n === 1 ? 'מחר' : 'בעוד ' + n + ' ימים';
+  };
+  var slot = function (t) {
+    return t === 'pre' ? 'לפני הפתיחה' : t === 'post' ? 'אחרי הנעילה' : '';
+  };
+
+  el.innerHTML = list.slice(0, 30).map(function (x) {
+    var r = x.r, s = slot(r.er.t);
+    return '<button class="ern" onclick="analyze(\'' + esc(r.s) + '\')">' +
+      '<span class="ern-d' + (x.n <= 1 ? ' soon' : '') + '">' +
+        '<b>' + x.d.toLocaleDateString('he-IL', { day: 'numeric' }) + '</b>' +
+        '<i>' + x.d.toLocaleDateString('he-IL', { month: 'short' }) + '</i>' +
+      '</span>' +
+      '<span class="ern-id">' +
+        '<span class="sym">' + esc(r.s) + '</span>' +
+        '<span class="nm">' + esc(r.n || '') + '</span>' +
+        '<span class="mini">' + when(x.n) + (s ? ' · ' + s : '') +
+          (r.er.eps ? ' · צפי ' + esc(r.er.eps) : '') + '</span>' +
+      '</span>' +
+      '<span class="ern-sc" style="color:' + scoreColor(r.sc && r.sc.total) +
+        '">' + ((r.sc && r.sc.total != null) ? r.sc.total : '—') + '</span>' +
+      '</button>';
+  }).join('') +
+  (list.length > 30 ? '<div class="score-note" style="margin-top:9px">מוצגים ' +
+    '30 מתוך ' + list.length + '.</div>' : '');
+}
+
 /* Kept as the single place that reports snapshot trouble. The card it used to
    write into moved into the settings sheet, so it only renders when that sheet
    is open; a load error is also surfaced on the market page below. */
@@ -1782,6 +1920,8 @@ function boot() {
   loadSnapshot().then(function () {
     renderBreadth();
     renderSectors();
+    renderChanges();
+    renderEarningsSoon();
     checkAlerts(false);
   });
 }

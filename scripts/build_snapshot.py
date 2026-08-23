@@ -1065,6 +1065,79 @@ def clean(d):
     return {k: round_sig(v) for k, v in d.items() if v is not None}
 
 
+def load_previous(path):
+    """The snapshot from the last run, read before this run overwrites it."""
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+def compute_changes(prev, rows, top=14, cap=40):
+    """What moved since the previous run.
+
+    This job is the only place that ever holds two snapshots at once, so the
+    diff is computed here rather than asking every device to keep yesterday's
+    copy and work it out again. A first run has nothing to compare against and
+    returns None, which the app renders as "no comparison yet" rather than as
+    an empty result.
+    """
+    if not prev or not prev.get("rows"):
+        return None
+    old = {r["s"]: r for r in prev["rows"]}
+    if not old:
+        return None
+
+    score, ma_up, ma_dn, hi52, lo52 = [], [], [], [], []
+
+    for r in rows:
+        o = old.get(r["s"])
+        if not o:
+            continue
+
+        new_s = (r.get("sc") or {}).get("total")
+        old_s = (o.get("sc") or {}).get("total")
+        if new_s is not None and old_s is not None and new_s != old_s:
+            score.append({"s": r["s"], "a": old_s, "b": new_s})
+
+        nt, ot = r.get("t") or {}, o.get("t") or {}
+        np_, op = nt.get("price"), ot.get("price")
+        nm, om = nt.get("ma200"), ot.get("ma200")
+        if None not in (np_, op, nm, om):
+            if op <= om and np_ > nm:
+                ma_up.append(r["s"])
+            elif op >= om and np_ < nm:
+                ma_dn.append(r["s"])
+
+        # from52High is 0 at the high and negative below it; from52Low is the
+        # mirror. A threshold rather than equality, because the high itself
+        # moves with the price and an exact 0 is not guaranteed to survive
+        # rounding.
+        nh, oh = nt.get("from52High"), ot.get("from52High")
+        if nh is not None and oh is not None and nh >= -0.5 > oh:
+            hi52.append(r["s"])
+        nl, ol = nt.get("from52Low"), ot.get("from52Low")
+        if nl is not None and ol is not None and nl <= 0.5 < ol:
+            lo52.append(r["s"])
+
+    score.sort(key=lambda x: abs(x["b"] - x["a"]), reverse=True)
+
+    out = {
+        "since": prev.get("generated"),
+        "score": score[:top],
+        "maUp": sorted(ma_up)[:cap],
+        "maDown": sorted(ma_dn)[:cap],
+        "hi52": sorted(hi52)[:cap],
+        "lo52": sorted(lo52)[:cap],
+        "compared": sum(1 for r in rows if r["s"] in old),
+    }
+    log(f"    changes vs {out['since']}: {len(score)} score moves, "
+        f"{len(ma_up)}/{len(ma_dn)} MA200 crossings, "
+        f"{len(hi52)} new highs, {len(lo52)} new lows")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0,
@@ -1073,6 +1146,10 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(DATA, exist_ok=True)
+    # Read before anything else can overwrite it - this is the previous run,
+    # and it is the only copy of it that will ever exist.
+    prev_snapshot = load_previous(os.path.join(DATA, "screener.json"))
+
     sec = sec_session()
     web = web_session()
 
@@ -1166,6 +1243,10 @@ def main():
         },
         "rows": rows,
     }
+    changes = compute_changes(prev_snapshot, rows)
+    if changes:
+        out["changes"] = changes
+
     path = os.path.join(DATA, "screener.json")
     with open(path, "w") as fh:
         json.dump(out, fh, separators=(",", ":"))
