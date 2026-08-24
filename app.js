@@ -149,8 +149,12 @@ function fetchRaw(url, timeoutMs) {
 }
 
 function yahooQuote(sym) {
+  /* The _ param is not for Yahoo, it is for the proxies in front of it.
+     fetchRaw asks the browser for no-store, but that only governs our hop to
+     the proxy - codetabs and allorigins cache by target URL, and with a fixed
+     URL they will happily replay this morning's quote all afternoon. */
   var url = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
-    encodeURIComponent(sym) + '?interval=1d&range=1d';
+    encodeURIComponent(sym) + '?interval=1d&range=1d&_=' + Date.now();
   return fetchRaw(url, 8000).then(function (txt) {
     var d = JSON.parse(txt);
     var r = d && d.chart && d.chart.result && d.chart.result[0];
@@ -164,6 +168,7 @@ function yahooQuote(sym) {
       chg: price != null && prev ? price - prev : null,
       chgPct: price != null && prev ? ((price - prev) / prev) * 100 : null,
       cur: m.currency || 'USD',
+      state: m.marketState || '',
       name: m.longName || m.shortName || ''
     };
   });
@@ -1288,12 +1293,21 @@ function checkAlerts(force) {
 function startPricePolling() {
   setInterval(function () {
     if (document.hidden) return;
-    if (!openTrades().length && !store.get(LS.alerts, []).length) return;
-    checkAlerts(false);
+    /* The indices were never in this loop at all - only symbols you had put
+       on a list were. That is why the home screen sat still through the
+       opening bell while the trade cards moved. */
+    if (currentTab() === 'home') loadTickers(false);
+    if (watchedSymbols().length) checkAlerts(false);
   }, PRICE_TTL);
 
   document.addEventListener('visibilitychange', function () {
-    if (!document.hidden) checkAlerts(false);
+    if (document.hidden) return;
+    /* The case that matters most on iOS: a PWA put down before the open and
+       picked up after it. The interval above does not run while the app is
+       suspended, so without this it would show whatever it had at the moment
+       it went to sleep. */
+    loadTickers(false);
+    checkAlerts(false);
   });
 }
 
@@ -2406,11 +2420,28 @@ var TICKERS_MINI = [
 
 function tkId(sym) { return 'tk-' + sym.replace(/[^A-Za-z0-9]/g, ''); }
 
-function loadTickers() {
-  var box = $('#tickers');
-  if (box.dataset.loaded) return;
-  box.dataset.loaded = '1';
+/* The indices used to be fetched exactly once and latched behind
+   dataset.loaded, so an app left open across the opening bell showed
+   pre-market numbers for the rest of the day. The tiles are still built once;
+   the quotes behind them now refresh. */
+var TICKERS_TTL = 60000;
+var TICKERS_AT = 0;    // when the last round went out, for the TTL
+var TICKERS_OK = 0;    // when a quote last actually landed, for the stamp
+var MKT_STATE = '';
 
+var MKT_STATE_HE = {
+  PRE: 'טרום מסחר',
+  REGULAR: 'השוק פתוח',
+  POST: 'אחרי הנעילה',
+  POSTPOST: 'השוק סגור',
+  PREPRE: 'השוק סגור',
+  CLOSED: 'השוק סגור'
+};
+
+function buildTickers() {
+  var box = $('#tickers');
+  if (!box) return false;
+  if (box.dataset.built) return true;
   var tile = function (t, cl) {
     return '<div class="' + cl + '" id="' + tkId(t[0]) + '">' +
       '<span class="nm">' + t[1] + '</span>' +
@@ -2419,27 +2450,82 @@ function loadTickers() {
   box.innerHTML = TICKERS.map(function (t) { return tile(t, 'tk'); }).join('');
   $('#tickersMini').innerHTML =
     TICKERS_MINI.map(function (t) { return tile(t, 'tk tk-mini'); }).join('');
+  box.dataset.built = '1';
+  return true;
+}
 
-  TICKERS.concat(TICKERS_MINI).forEach(function (t) {
-    yahooQuote(t[0]).then(function (q) {
-      var el = $('#' + tkId(t[0]));
-      if (!el) return;
-      var sk = el.querySelector('.skel');
-      if (sk) sk.remove();
-      if (q.price == null) { el.innerHTML += '<span class="val">—</span>'; return; }
-      el.innerHTML += '<span class="val">' + num(q.price, t[2]) + '</span>' +
-        '<span class="ch ' + cls(q.chgPct) + '">' + pct(q.chgPct, 1) + '</span>';
-    }).catch(function () {
-      var el = $('#' + tkId(t[0]));
-      if (!el) return;
-      var sk = el.querySelector('.skel');
-      if (sk) sk.remove();
-      el.innerHTML += '<span class="val">—</span>';
-    });
+/* Replaces the tile outright. The old code appended to innerHTML, which was
+   only safe because it ran once - on a refresh it would have stacked a second
+   price alongside the first. */
+function paintTicker(t, q) {
+  var el = $('#' + tkId(t[0]));
+  if (!el) return;
+  var had = el.querySelector('.val');
+  var name = '<span class="nm">' + t[1] + '</span>';
+
+  if (!q || q.price == null) {
+    /* Keep the last good number rather than blanking a tile that was working:
+       a failed refresh is not the same as no data, and the stamp above the
+       grid is what tells the user the numbers have stopped moving. */
+    if (!had) el.innerHTML = name + '<span class="val">—</span>';
+    return;
+  }
+
+  var was = had ? parseFloat(had.textContent.replace(/[^\d.-]/g, '')) : NaN;
+  el.innerHTML = name +
+    '<span class="val">' + num(q.price, t[2]) + '</span>' +
+    '<span class="ch ' + cls(q.chgPct) + '">' + pct(q.chgPct, 1) + '</span>';
+  if (!isNaN(was) && Math.abs(was - q.price) > 1e-9) tickFlash(el, q.price > was);
+}
+
+/* A tick you can see. Without it there is no way to tell a live number that
+   happened to land on the same digits from a frozen one. */
+function tickFlash(el, up) {
+  el.classList.remove('tick-up', 'tick-dn');
+  void el.offsetWidth;                       // restart the animation
+  el.classList.add(up ? 'tick-up' : 'tick-dn');
+}
+
+function loadTickers(force) {
+  if (!buildTickers()) return;
+  var now = Date.now();
+  if (!force && TICKERS_AT && now - TICKERS_AT < TICKERS_TTL) return;
+  TICKERS_AT = now;                          // claim the slot before awaiting
+
+  /* Spread out rather than fired as one burst of seven. This used to run once
+     per page load, where a burst was fine; now it repeats every minute, and
+     with the cache-buster above none of it can be absorbed by a proxy cache.
+     codetabs rate-limits per second, and a 429 would look exactly like the
+     freeze this whole change is meant to fix. */
+  TICKERS.concat(TICKERS_MINI).forEach(function (t, i) {
+    setTimeout(function () {
+      yahooQuote(t[0]).then(function (q) {
+        paintTicker(t, q);
+        if (q && q.price != null) {
+          TICKERS_OK = Date.now();
+          if (t[0] === '^GSPC' && q.state) MKT_STATE = q.state;
+          paintMktState();
+        }
+      }).catch(function () { paintTicker(t, null); });
+    }, i * 220);   // >=200ms keeps any one-second window at five or fewer
   });
+  paintMktState();
+}
 
-  $('#mktState').textContent = 'עודכן ' + new Date().toLocaleTimeString('he-IL',
-    { hour: '2-digit', minute: '2-digit' });
+/* The old stamp was written the moment the requests went out, so it read
+   "updated 16:31" beside numbers that had never arrived - a fresh-looking
+   time next to stale prices. It now reports when a quote last landed, and
+   says plainly when that has stopped happening. */
+function paintMktState() {
+  var el = $('#mktState');
+  if (!el) return;
+  if (!TICKERS_OK) { el.textContent = 'טוען…'; return; }
+  var txt = MKT_STATE_HE[MKT_STATE] || '';
+  txt += (txt ? ' · ' : '') + 'עודכן ' +
+    new Date(TICKERS_OK).toLocaleTimeString('he-IL',
+      { hour: '2-digit', minute: '2-digit' });
+  if (Date.now() - TICKERS_OK > 4 * TICKERS_TTL) txt += ' · לא מתעדכן';
+  el.textContent = txt;
 }
 
 /* Market breadth, derived from the nightly snapshot.

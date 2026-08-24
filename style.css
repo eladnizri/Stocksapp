@@ -185,6 +185,22 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 @keyframes sh { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 
+/* A refreshed tile flashes in the direction it moved, so a live number is
+   distinguishable from a stuck one at a glance. */
+.tk.tick-up { animation: tickUp .7s ease-out; }
+.tk.tick-dn { animation: tickDn .7s ease-out; }
+@keyframes tickUp {
+  0%   { background: color-mix(in srgb, var(--gain) 22%, var(--surface-2)); }
+  100% { background: var(--surface-2); }
+}
+@keyframes tickDn {
+  0%   { background: color-mix(in srgb, var(--loss) 22%, var(--surface-2)); }
+  100% { background: var(--surface-2); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tk.tick-up, .tk.tick-dn { animation: none; }
+}
+
 /* A compact strip for the secondary quotes - currency, gold, oil. */
 .tk-strip {
   display: grid; grid-auto-flow: column; grid-auto-columns: 1fr;
