@@ -2076,26 +2076,76 @@ var FILTERS = [
    'שינוי המחיר ב־12 החודשים האחרונים, בלי דיבידנדים.']
 ];
 
+/* iOS shows no minus key on the decimal keypad, so seven of the filters -
+   and "מרחק משיא", whose range is entirely negative - could not be given a
+   valid value at all. The toggle sits inside the field's own padding rather
+   than beside it, so it costs no width on a narrow screen. */
+function numField(id, ph, val, signed) {
+  var v = val != null ? val : '';
+  if (!signed) {
+    return '<input id="' + id + '" inputmode="decimal" placeholder="' +
+      esc(ph) + '" value="' + v + '">';
+  }
+  return '<span class="numf">' +
+    '<button type="button" class="sgn" onclick="flipSign(\'' + id + '\')" ' +
+      'aria-label="חיובי או שלילי">\u00b1</button>' +
+    '<input id="' + id + '" inputmode="decimal" placeholder="' + esc(ph) +
+      '" value="' + v + '" oninput="paintSigns()">' +
+    '</span>';
+}
+
+function flipSign(id) {
+  var el = $('#' + id);
+  if (!el) return;
+  var v = (el.value || '').trim();
+  if (v === '' ) el.value = '-';          // ready for the digits that follow
+  else if (v === '-') el.value = '';
+  else if (v.charAt(0) === '-') el.value = v.slice(1);
+  else el.value = '-' + v;
+  paintSigns();
+  haptic(6);
+}
+
+/* The button shows the sign the field currently carries, so a minus is
+   visible without reading the number. */
+function paintSigns() {
+  var els = document.querySelectorAll('.numf');
+  for (var i = 0; i < els.length; i++) {
+    var inp = els[i].querySelector('input');
+    var btn = els[i].querySelector('.sgn');
+    if (!inp || !btn) continue;
+    var neg = (inp.value || '').trim().charAt(0) === '-';
+    btn.classList.toggle('on', neg);
+    btn.textContent = neg ? '\u2212' : '\u00b1';
+  }
+}
+
 function renderFilters() {
   renderScreens();
   renderSectorChips();
   var saved = store.get(LS.filters, {});
   $('#filterRows').innerHTML = FILTERS.map(function (f) {
     var v = saved[f[0]] || {};
+    // Only where a negative value is actually in range.
+    var signed = f[2] < 0 || f[3] < 0;
     return '<div class="frow">' +
       '<span class="lb"><span class="lb-t">' + f[1] + '</span>' +
         (f[4] ? '<button class="info" onclick="toggleHelp(\'' + f[0] +
           '\')" aria-label="הסבר על ' + f[1] + '">i</button>' : '') +
       '</span>' +
-      '<input id="f-' + f[0] + '-min" inputmode="decimal" placeholder="מ־ ' +
-        f[2] + '" value="' + (v.min != null ? v.min : '') + '">' +
-      '<input id="f-' + f[0] + '-max" inputmode="decimal" placeholder="עד ' +
-        f[3] + '" value="' + (v.max != null ? v.max : '') + '">' +
+      /* Just "from" and "to": the bounds are stated in the info panel below,
+         and repeating them here clipped to nonsense once the sign button took
+         part of the field. */
+      numField('f-' + f[0] + '-min', 'מ־', v.min, signed) +
+      numField('f-' + f[0] + '-max', 'עד', v.max, signed) +
       '</div>' +
       (f[4] ? '<div class="fhelp" id="h-' + f[0] + '">' +
         '<b class="rng">טווח בנתונים: ' + f[2] + ' עד ' + f[3] + '</b>' +
         f[4] + '</div>' : '');
   }).join('');
+
+  // Before the early return below, so saved negatives show their sign either way.
+  paintSigns();
 
   /* Build the index chips from what the snapshot actually contains, so an
      index that failed to scrape never shows up as a filter matching nothing. */

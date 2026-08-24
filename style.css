@@ -543,7 +543,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .frow > * { flex: 1; min-width: 0; }
 /* A filter label competes with two number inputs that need far less room -
    at an equal third, "שווי שוק (מיליארד $)" broke over three lines. */
-.frow .lb { flex: 1.7; }
+.frow .lb { flex: 1.45; }
 .frow input[inputmode="decimal"] { flex: .85; }
 .frow input, .frow select {
   width: 100%; font: inherit; font-size: .92rem; font-weight: 500; color: var(--ink);
@@ -1041,3 +1041,23 @@ a.btn { display: block; text-decoration: none; }
 .day .fold > div { padding-top: 8px; }
 /* The date badge moved into the day header, so the row is two columns now. */
 .day .ern { grid-template-columns: minmax(0, 1fr) auto; }
+
+/* ---- sign toggle on filters that accept a negative ----
+   iOS has no minus key on the decimal keypad. The button sits inside the
+   field's own start padding, so it costs no width on a narrow screen. */
+.numf { position: relative; flex: .85; min-width: 0; }
+.numf input { text-align: start; }
+.numf input { width: 100%; padding-inline-start: 32px; }
+.sgn {
+  position: absolute; inset-inline-start: 3px; top: 50%;
+  transform: translateY(-50%);
+  width: 26px; height: 26px; border-radius: 8px;
+  display: grid; place-items: center;
+  font-size: .82rem; font-weight: 800; line-height: 1;
+  color: var(--muted); background: var(--surface);
+  border: 1px solid var(--border);
+}
+.sgn:active { transform: translateY(-50%) scale(.9); }
+.sgn.on {
+  color: #fff; background: var(--alert); border-color: var(--alert);
+}
