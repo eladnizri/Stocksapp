@@ -215,40 +215,6 @@ function yahooQuote(sym) {
   });
 }
 
-/* Nasdaq's own quote API, reached directly - no proxy, because Nasdaq sets
-   real CORS headers on it. Only usable for symbols Nasdaq actually quotes
-   (stocks and ETFs), which is why this exists alongside yahooQuote rather
-   than replacing it: an index level, a forex pair or a futures contract has
-   no Nasdaq listing to ask about. */
-function nasdaqNum(s) {
-  if (s == null) return null;
-  var n = parseFloat(String(s).replace(/[^0-9.-]/g, ''));
-  return isNaN(n) ? null : n;
-}
-function nasdaqQuote(sym) {
-  var url = 'https://api.nasdaq.com/api/quote/' + encodeURIComponent(sym) +
-    '/info?assetclass=etf&_=' + Date.now();
-  var ctrl = new AbortController();
-  var timer = setTimeout(function () { ctrl.abort(); }, 6000);
-  return fetch(url, {
-    cache: 'no-store', signal: ctrl.signal,
-    headers: { 'Accept': 'application/json' }
-  }).then(function (r) {
-    clearTimeout(timer);
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.json();
-  }).then(function (d) {
-    var pd = (d && d.data && d.data.primaryData) || {};
-    var price = nasdaqNum(pd.lastSalePrice);
-    if (price == null) throw new Error('אין נתונים');
-    return {
-      price: price,
-      chgPct: nasdaqNum(pd.percentageChange),
-      state: (d && d.data && d.data.marketStatus) || ''
-    };
-  }).catch(function (e) { clearTimeout(timer); throw e; });
-}
-
 /* --------------------------------------------------------------- snapshot */
 var SNAP = null;
 var SNAP_BY_SYM = {};
@@ -2479,29 +2445,38 @@ function runScreen() {
 }
 
 /* ------------------------------------------------------------------ home */
-/* Yahoo's chart API - the only place VIX and USD/ILS come from - is only
-   reachable through public CORS proxies, and all three the app knows about
-   failed at once: two timed out completely, the third now demands a paid
-   API key it does not have. Wherever a liquid ETF tracks the same thing
-   closely enough, that entry goes through Nasdaq's quote API instead,
-   which sets real CORS headers and needs no proxy at all - the same source
-   check_alerts.py already relies on for every price alert. VIX and the
-   shekel have no such ETF and stay on the Yahoo path, so they still show
-   nothing while all three proxies are down; that is an honest "no source
-   available" rather than a wrong number.
-   Row shape: [symbol, label, decimals, source]. source is 'nasdaq' (direct,
-   no proxy - assetclass is always etf for every symbol used here) or
-   'yahoo' (through fetchRaw's proxy chain). */
+/* Where these numbers come from, after measuring rather than assuming:
+
+   - Yahoo sets no CORS headers, so the page can only reach it through public
+     CORS proxies. All three failed at once (two timed out, corsproxy.io now
+     wants a paid key) and they flap in and out hour to hour.
+   - Nasdaq answers a server perfectly but also sends no CORS header, so a
+     browser is never allowed to read its response. Reachable and readable are
+     different things; assuming otherwise is what made the tiles sit blank.
+
+   So the five tiles that have a liquid ETF tracking them are fetched on a
+   runner by scripts/build_tickers.py, committed as data/tickers.json, and
+   read from there - same origin, no CORS, the shape data/screener.json has
+   always used. They refresh with the alert check, every 15 minutes while the
+   market is open. The price shown is the fund's, not the index level, which
+   is why each label carries its ETF ticker.
+
+   VIX and USD/ILS have no such ETF and no server-side source that answers a
+   runner either, so they stay on the Yahoo path and show nothing whenever the
+   proxies are down - an honest "no source" rather than a wrong number.
+
+   Row shape: [symbol, label, decimals, source], source 'file' (data/tickers.json)
+   or 'yahoo' (through fetchRaw's proxy chain). */
 var TICKERS = [
-  ['SPY', 'S&P 500 (SPY)', 2, 'nasdaq'],
-  ['QQQ', 'נאסד״ק (QQQ)', 2, 'nasdaq'],
+  ['SPY', 'S&P 500 (SPY)', 2, 'file'],
+  ['QQQ', 'נאסד״ק (QQQ)', 2, 'file'],
   ['^VIX', 'VIX', 2, 'yahoo'],
-  ['IBIT', 'ביטקוין (IBIT)', 2, 'nasdaq']
+  ['IBIT', 'ביטקוין (IBIT)', 2, 'file']
 ];
 var TICKERS_MINI = [
   ['USDILS=X', 'דולר / שקל', 3, 'yahoo'],
-  ['GLD', 'זהב (GLD)', 2, 'nasdaq'],
-  ['USO', 'נפט (USO)', 2, 'nasdaq']
+  ['GLD', 'זהב (GLD)', 2, 'file'],
+  ['USO', 'נפט (USO)', 2, 'file']
 ];
 
 function tkId(sym) { return 'tk-' + sym.replace(/[^A-Za-z0-9]/g, ''); }
@@ -2564,7 +2539,7 @@ function buildTickers() {
     paintTicker(t, { price: c.p, chgPct: c.c });
     if (c.t > newest) newest = c.t;
   });
-  if (newest) { TICKERS_OK = newest; paintMktState(); }
+  if (newest) markFresh(newest);
   return true;
 }
 
@@ -2606,40 +2581,84 @@ function loadTickers(force) {
   if (!force && TICKERS_AT && now - TICKERS_AT < TICKERS_TTL) return;
   TICKERS_AT = now;                          // claim the slot before awaiting
 
-  /* Spread out rather than fired as one burst of seven. This used to run once
-     per page load, where a burst was fine; now it repeats every minute, and
-     with the cache-buster above none of it can be absorbed by a proxy cache.
-     codetabs rate-limits per second, and a 429 would look exactly like the
-     freeze this whole change is meant to fix. */
-  var all = TICKERS.concat(TICKERS_MINI);
+  /* One request covers every file-backed tile, so the whole S&P/Nasdaq/
+     bitcoin/gold/oil row costs a single same-origin GET that cannot be
+     blocked by CORS or refused by somebody else's proxy. */
+  loadTickerFile();
+
+  /* Only the tiles with no server-side source left - VIX and USD/ILS - still
+     go out through the proxy chain, spread apart so a proxy that does answer
+     is not rate-limited by our own burst. */
+  var live = TICKERS.concat(TICKERS_MINI).filter(function (t) {
+    return t[3] === 'yahoo';
+  });
   var ok = 0, done = 0;
-  all.forEach(function (t, i) {
+  live.forEach(function (t, i) {
     setTimeout(function () {
-      var fetchQuote = t[3] === 'nasdaq' ? nasdaqQuote : yahooQuote;
-      fetchQuote(t[0]).then(function (q) {
+      yahooQuote(t[0]).then(function (q) {
         paintTicker(t, q);
         if (q && q.price != null) {
           ok++;
           TK_CACHE[t[0]] = { p: q.price, c: q.chgPct, t: Date.now() };
           try { store.set(LS.tk, TK_CACHE); } catch (e) {}
-          TICKERS_OK = Date.now();
-          // The first tile is always the app's primary index, whichever
-          // symbol and source currently back it.
-          if (i === 0 && q.state) MKT_STATE = q.state;
-          paintMktState();
+          markFresh();
         }
       }).catch(function () { paintTicker(t, null); }).then(function () {
         done++;
-        if (done < all.length) return;
-        /* Every symbol failed - every proxy is almost certainly down at
-           once, which in practice has been a passing hiccup, not a lasting
-           outage. Retry well before the normal 60s TTL rather than leaving
-           stale numbers on screen for the rest of the minute. */
+        if (done < live.length) return;
+        /* Every proxy failed for every symbol - in practice a passing hiccup
+           rather than a lasting outage. Retry well before the normal 60s TTL
+           rather than leaving stale numbers up for the rest of the minute. */
         if (!ok) { TICKERS_AT = 0; setTimeout(function () { loadTickers(false); }, 15000); }
       });
-    }, i * 220);   // >=200ms keeps any one-second window at five or fewer
+    }, i * 220);
   });
   paintMktState();
+}
+
+/* Records that a quote landed, without ever moving the stamp backwards: the
+   file's own timestamp and a live proxy quote can arrive in either order, and
+   the stamp should always report the freshest thing on screen. */
+function markFresh(at) {
+  var t = at || Date.now();
+  if (t > TICKERS_OK) TICKERS_OK = t;
+  paintMktState();
+}
+
+/* The five tiles a runner fetches for us. Same origin, so this is the one
+   request on the home screen that no proxy outage and no CORS policy can
+   break. */
+function loadTickerFile() {
+  return fetch('data/tickers.json?t=' + Date.now(), { cache: 'no-store' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function (d) {
+      var quotes = (d && d.quotes) || {};
+      /* The file's own timestamp, not the moment it was downloaded: it is
+         rebuilt every fifteen minutes, so reporting the fetch time would
+         claim a freshness the numbers do not have. */
+      var at = d && d.generated ? Date.parse(d.generated) : NaN;
+      if (isNaN(at)) at = Date.now();
+
+      TICKERS.concat(TICKERS_MINI).forEach(function (t) {
+        if (t[3] !== 'file') return;
+        var q = quotes[t[0]];
+        if (!q || q.p == null) { paintTicker(t, null); return; }
+        paintTicker(t, { price: q.p, chgPct: q.c });
+        TK_CACHE[t[0]] = { p: q.p, c: q.c, t: at };
+      });
+      try { store.set(LS.tk, TK_CACHE); } catch (e) {}
+      if (d && d.marketStatus) MKT_STATE = d.marketStatus;
+      markFresh(at);
+      return d;
+    })
+    .catch(function () {
+      /* Nothing to repaint: whatever the cache put on screen at build time
+         stays, and the stamp keeps reporting its real age. */
+      return null;
+    });
 }
 
 /* The old stamp was written the moment the requests went out, so it read

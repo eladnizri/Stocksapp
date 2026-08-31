@@ -68,18 +68,27 @@ jobs:
             ${{ inputs.probe && format('--probe {0}', inputs.probe) || '' }} \
             ${{ inputs.dry_run && '--dry-run' || '' }}
 
+      # Rides along with the alert check rather than getting a schedule of its
+      # own: this job already has to run on time for alerts to work at all, and
+      # a second cron would be a second thing that can silently stop firing.
+      # Skipped for --probe, which is only meant to test one symbol and stop.
+      - name: Refresh home-screen tickers
+        if: ${{ !inputs.probe }}
+        continue-on-error: true
+        run: python scripts/build_tickers.py
+
       - name: Commit fired state
-        if: steps.check.outputs.changed == 'true' && !inputs.dry_run
+        if: ${{ !inputs.dry_run }}
         run: |
           git config user.name  'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add data/alert_state.json
+          git add data/alert_state.json data/tickers.json
           if git diff --staged --quiet; then
             echo "nothing to commit"
             exit 0
           fi
           # [skip ci] keeps this off the stamp workflow's back.
-          git commit -m "Update alert state [skip ci]"
+          git commit -m "Update prices [skip ci]"
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
               echo "pushed on attempt $attempt"
