@@ -25,3 +25,6 @@ jobs:
         run: python scripts/probe_analyst.py
       - name: Probe the client's CORS proxies
         run: python scripts/probe_cors_proxies.py
+      - name: Probe server-side quote sources
+        if: always()
+        run: python scripts/probe_server_quotes.py
