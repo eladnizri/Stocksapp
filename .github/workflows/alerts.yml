@@ -10,6 +10,16 @@ name: Check price alerts
 on:
   schedule:
     - cron: '*/15 13-21 * * 1-5'
+  # GitHub's own scheduler can silently stop delivering cron ticks for days
+  # with no error anywhere - it happened here for three days straight,
+  # through a full trading day, with the workflow itself reporting healthy
+  # the moment it was run by hand. This does not fix that, but it means a
+  # newly added or changed alert still gets checked once immediately, rather
+  # than waiting on a scheduler that may not be firing at all.
+  push:
+    branches: [main]
+    paths:
+      - 'data/alerts.json'
   workflow_dispatch:
     inputs:
       dry_run:

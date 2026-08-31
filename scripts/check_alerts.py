@@ -78,9 +78,13 @@ def parse_money(s):
         return None
 
 
-def quote_live(sess, symbol):
+ASSET_CLASSES = ("stocks", "etf")   # IBIT and friends answer under etf, not stocks
+
+
+def quote_live(sess, symbol, assetclass="stocks"):
     """Last sale from Nasdaq. None if the endpoint will not answer."""
-    url = f"https://api.nasdaq.com/api/quote/{symbol}/info?assetclass=stocks"
+    url = (f"https://api.nasdaq.com/api/quote/{symbol}/info"
+           f"?assetclass={assetclass}")
     try:
         r = sess.get(url, timeout=20)
     except Exception:
@@ -94,7 +98,7 @@ def quote_live(sess, symbol):
     return parse_money(pd.get("lastSalePrice"))
 
 
-def quote_close(sess, symbol):
+def quote_close(sess, symbol, assetclass="stocks"):
     """Most recent daily close, as a fallback.
 
     This is the endpoint the nightly snapshot already relies on, so it is the
@@ -104,7 +108,7 @@ def quote_close(sess, symbol):
     end = dt.date.today()
     start = end - dt.timedelta(days=10)
     url = (f"https://api.nasdaq.com/api/quote/{symbol}/historical"
-           f"?assetclass=stocks&fromdate={start}&todate={end}&limit=5")
+           f"?assetclass={assetclass}&fromdate={start}&todate={end}&limit=5")
     try:
         r = sess.get(url, timeout=25)
     except Exception:
@@ -124,13 +128,21 @@ def quote_close(sess, symbol):
 
 
 def get_price(sess, symbol):
-    """(price, source). Live if the quote endpoint answers, else last close."""
-    p = quote_live(sess, symbol)
-    if p is not None:
-        return p, "live"
-    p = quote_close(sess, symbol)
-    if p is not None:
-        return p, "close"
+    """(price, source). Live if the quote endpoint answers, else last close.
+
+    Nasdaq's quote API partitions by asset class and answers nothing at all
+    for the wrong one - IBIT (an ETF) got "unavailable" forever because every
+    request asked for it as a stock. Try stocks first, since that covers most
+    of what gets alerted on, then etf.
+    """
+    for assetclass in ASSET_CLASSES:
+        p = quote_live(sess, symbol, assetclass)
+        if p is not None:
+            return p, "live"
+    for assetclass in ASSET_CLASSES:
+        p = quote_close(sess, symbol, assetclass)
+        if p is not None:
+            return p, "close"
     return None, None
 
 
@@ -221,13 +233,20 @@ def main():
     if args.probe:
         sym = args.probe.strip().upper()
         sess = session()
-        live = quote_live(sess, sym)
-        close = quote_close(sess, sym)
         log(f"probe {sym}")
-        log(f"    live  (quote/info)      : "
-            f"{live if live is not None else 'NO ANSWER'}")
-        log(f"    close (quote/historical): "
-            f"{close if close is not None else 'NO ANSWER'}")
+        live = close = None
+        for assetclass in ASSET_CLASSES:
+            live = quote_live(sess, sym, assetclass)
+            log(f"    live  (quote/info, {assetclass:6}) : "
+                f"{live if live is not None else 'NO ANSWER'}")
+            if live is not None:
+                break
+        for assetclass in ASSET_CLASSES:
+            close = quote_close(sess, sym, assetclass)
+            log(f"    close (quote/historical, {assetclass:6}): "
+                f"{close if close is not None else 'NO ANSWER'}")
+            if close is not None:
+                break
         if live is None and close is None:
             log("    neither endpoint answered - alerts cannot run")
             return 1

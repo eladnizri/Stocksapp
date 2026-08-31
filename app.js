@@ -52,7 +52,10 @@ var LS = {
   risk: 'sa_risk',
   watch: 'sa_watch',
   compare: 'sa_compare',
-  folds: 'sa_folds'
+  folds: 'sa_folds',
+  /* Last known index/mini-ticker quotes, so a reload during a proxy outage
+     paints real numbers instead of a bare skeleton. */
+  tk: 'sa_tk'
 };
 
 var store = {
@@ -155,7 +158,10 @@ function yahooQuote(sym) {
      URL they will happily replay this morning's quote all afternoon. */
   var url = 'https://query1.finance.yahoo.com/v8/finance/chart/' +
     encodeURIComponent(sym) + '?interval=1d&range=1d&_=' + Date.now();
-  return fetchRaw(url, 8000).then(function (txt) {
+  /* Shorter than fetchRaw's own default: this chain tries up to four proxies
+     in sequence on failure, so a slow one should be abandoned quickly rather
+     than making every caller wait 8s per hop before the next gets a turn. */
+  return fetchRaw(url, 6000).then(function (txt) {
     var d = JSON.parse(txt);
     var r = d && d.chart && d.chart.result && d.chart.result[0];
     if (!r || !r.meta) throw new Error('אין נתונים');
@@ -2428,6 +2434,11 @@ var TICKERS_TTL = 60000;
 var TICKERS_AT = 0;    // when the last round went out, for the TTL
 var TICKERS_OK = 0;    // when a quote last actually landed, for the stamp
 var MKT_STATE = '';
+/* Last quote seen for each symbol, kept past a reload. Yahoo is reached only
+   through public CORS proxies (codetabs, allorigins, corsproxy.io) that can
+   all be down at once - when that happens, a fresh page load should still
+   show the last real numbers instead of a blank skeleton. */
+var TK_CACHE = store.get(LS.tk, {});
 
 var MKT_STATE_HE = {
   PRE: 'טרום מסחר',
@@ -2451,6 +2462,19 @@ function buildTickers() {
   $('#tickersMini').innerHTML =
     TICKERS_MINI.map(function (t) { return tile(t, 'tk tk-mini'); }).join('');
   box.dataset.built = '1';
+
+  /* Paint whatever was cached before the network round even starts. A page
+     opened while every proxy happens to be down should show the last real
+     numbers, not a bare skeleton - loadTickers corrects them moments later
+     if the network is fine. */
+  var newest = 0;
+  TICKERS.concat(TICKERS_MINI).forEach(function (t) {
+    var c = TK_CACHE[t[0]];
+    if (!c) return;
+    paintTicker(t, { price: c.p, chgPct: c.c });
+    if (c.t > newest) newest = c.t;
+  });
+  if (newest) { TICKERS_OK = newest; paintMktState(); }
   return true;
 }
 
@@ -2497,16 +2521,29 @@ function loadTickers(force) {
      with the cache-buster above none of it can be absorbed by a proxy cache.
      codetabs rate-limits per second, and a 429 would look exactly like the
      freeze this whole change is meant to fix. */
-  TICKERS.concat(TICKERS_MINI).forEach(function (t, i) {
+  var all = TICKERS.concat(TICKERS_MINI);
+  var ok = 0, done = 0;
+  all.forEach(function (t, i) {
     setTimeout(function () {
       yahooQuote(t[0]).then(function (q) {
         paintTicker(t, q);
         if (q && q.price != null) {
+          ok++;
+          TK_CACHE[t[0]] = { p: q.price, c: q.chgPct, t: Date.now() };
+          try { store.set(LS.tk, TK_CACHE); } catch (e) {}
           TICKERS_OK = Date.now();
           if (t[0] === '^GSPC' && q.state) MKT_STATE = q.state;
           paintMktState();
         }
-      }).catch(function () { paintTicker(t, null); });
+      }).catch(function () { paintTicker(t, null); }).then(function () {
+        done++;
+        if (done < all.length) return;
+        /* Every symbol failed - every proxy is almost certainly down at
+           once, which in practice has been a passing hiccup, not a lasting
+           outage. Retry well before the normal 60s TTL rather than leaving
+           stale numbers on screen for the rest of the minute. */
+        if (!ok) { TICKERS_AT = 0; setTimeout(function () { loadTickers(false); }, 15000); }
+      });
     }, i * 220);   // >=200ms keeps any one-second window at five or fewer
   });
   paintMktState();
