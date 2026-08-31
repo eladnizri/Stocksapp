@@ -475,12 +475,14 @@ function addWatch(sym) {
   if (el) el.value = '';
   renderWatchlist();
   checkAlerts(false);
+  queueSync();          // the runner prices whatever is on this list
   haptic(10);
 }
 
 function removeWatch(sym) {
   store.set(LS.watch, watchlist().filter(function (s) { return s !== sym; }));
   renderWatchlist();
+  queueSync();
 }
 
 function inWatchlist(sym) { return watchlist().indexOf(sym) >= 0; }
@@ -1302,17 +1304,26 @@ function watchedSymbols() {
 function checkAlerts(force) {
   var syms = watchedSymbols();
   if (!syms.length) return;
-  var now = Date.now();
 
-  syms.forEach(function (sym) {
-    // A cached price is only good for PRICE_TTL. Skipping on "we have one"
-    // alone is what froze the trade cards.
+  /* The runner prices every watched symbol into data/tickers.json, so the
+     same same-origin file that feeds the home tiles feeds these too. This is
+     the reliable path: no CORS, no third-party proxy that can be down. The
+     Yahoo attempt below is only a chance at something fresher than the file's
+     fifteen minutes, and it is fine for it to fail. */
+  loadTickerFile(force).then(function () { freshenWatched(force); })
+    .catch(function () { freshenWatched(force); });
+}
+
+/* Whatever the file could not supply, asked for the old way. */
+function freshenWatched(force) {
+  var now = Date.now();
+  watchedSymbols().forEach(function (sym) {
     var fresh = PRICE_AT[sym] && (now - PRICE_AT[sym]) < PRICE_TTL;
     if (!force && ALERT_PRICES[sym] != null && fresh) return;
 
     var snap = SNAP_BY_SYM[sym];
     if (snap && snap.t && snap.t.price != null && ALERT_PRICES[sym] == null) {
-      ALERT_PRICES[sym] = snap.t.price;   // shown until the live one lands
+      ALERT_PRICES[sym] = snap.t.price;   // shown until a real one lands
       renderAlerts();
       paintTrades();
     }
@@ -1638,6 +1649,52 @@ function closeTrade(id) {
   renderTrades();
 }
 
+/* Selling part of a position: take something off at a target and let the rest
+   run, which is the whole reason a target and a trailing stop coexist. */
+function sellPart(id) {
+  var list = trades();
+  var t = null;
+  for (var i = 0; i < list.length; i++) if (list[i].id === id) t = list[i];
+  if (!t) return;
+
+  var left = openQty(t);
+  if (!t.qty) {
+    alert('כדי למכור חלק צריך שתהיה כמות מניות בעסקה. ערוך אותה והוסף כמות.');
+    return;
+  }
+  if (left <= 0) return;
+
+  var half = Math.floor(left / 2) || left;   // one share left sells whole
+  var qv = prompt('כמה מניות למכור מתוך ' + left + '?', String(half));
+  if (qv === null) return;
+  var qty = parseFloat(qv);
+  if (isNaN(qty) || qty <= 0) return;
+  if (qty > left) qty = left;
+
+  var live = ALERT_PRICES[t.s];
+  var pv = prompt('מחיר מכירה ל־' + t.s + ':',
+                  live != null ? live.toFixed(2) : '');
+  if (pv === null) return;
+  var price = parseFloat(pv);
+  if (isNaN(price) || price <= 0) return;
+
+  t.exits = (t.exits || []).concat([{
+    qty: qty, price: price, date: new Date().toISOString().slice(0, 10)
+  }]);
+
+  // Selling the last share is a close, not a partial - otherwise the trade
+  // would sit open with nothing in it.
+  if (openQty(t) <= 0) {
+    t.status = 'closed';
+    t.exit = price;
+    t.closed = new Date().toISOString().slice(0, 10);
+  }
+  setTrades(list);
+  syncTradeAlerts();
+  renderTrades();
+  haptic(12);
+}
+
 function deleteTrade(id) {
   setTrades(trades().filter(function (t) { return t.id !== id; }));
   syncTradeAlerts();
@@ -1729,15 +1786,53 @@ function openRisk() {
 
 /* What a closed trade actually made or lost. Per share when no size was
    recorded, which is still an answer. */
+/* Scaling out.
+ *
+ * t.qty stays the size the position was opened at, so the entry, the risk and
+ * every R figure keep meaning what they meant on day one. What was sold along
+ * the way lives in t.exits, and the remainder is derived. Storing the
+ * remaining quantity instead would quietly rewrite the trade's own history
+ * every time a piece was sold. */
+function soldQty(t) {
+  return (t.exits || []).reduce(function (a, e) { return a + e.qty; }, 0);
+}
+
+function realisedMoney(t) {
+  return (t.exits || []).reduce(function (a, e) {
+    return a + (e.price - t.entry) * e.qty;
+  }, 0);
+}
+
+/* Shares still in the market. null when the trade carries no quantity at all,
+   where everything is quoted per share and there is nothing to divide. */
+function openQty(t) {
+  if (!t.qty) return null;
+  return Math.max(0, t.qty - soldQty(t));
+}
+
 function tradeResult(t) {
-  if (t.exit == null) return null;
-  return (t.exit - t.entry) * (t.qty || 1);
+  var got = realisedMoney(t);
+  if (t.exit == null) return (t.exits && t.exits.length) ? got : null;
+  // The closing price applies only to whatever was left.
+  var remain = t.qty ? Math.max(0, t.qty - soldQty(t)) : 1;
+  return got + (t.exit - t.entry) * remain;
 }
 
 function tradeR(t, price) {
   var risk = t.entry - t.stop;
   if (!risk || price == null) return null;
   return (price - t.entry) / risk;
+}
+
+/* R for a finished trade, measured on the money actually made rather than on
+   the last price alone - otherwise a position sold half at the target and
+   half at breakeven would be filed under whichever half happened to close it.
+   Identical to (exit-entry)/risk when nothing was scaled out. */
+function closedR(t) {
+  var risk = t.entry - t.stop;
+  var got = tradeResult(t);
+  if (!risk || got == null) return null;
+  return got / (risk * (t.qty || 1));
 }
 
 function tradePrice(t) {
@@ -1756,9 +1851,14 @@ function tradePrice(t) {
    an answer rather than a dash. */
 function tradeMoney(t) {
   var price = tradePrice(t);
-  var per = t.qty || 1;
+  // Only what is still open can still gain or lose; what was already sold is
+  // banked and reported separately.
+  var per = t.qty ? openQty(t) : 1;
   return {
     perShare: !t.qty,
+    open: t.qty ? openQty(t) : null,
+    sold: soldQty(t),
+    realised: realisedMoney(t),
     now: price == null ? null : (price - t.entry) * per,
     ifStopped: (t.stop - t.entry) * per,
     ifTarget: t.target == null ? null : (t.target - t.entry) * per
@@ -1839,15 +1939,23 @@ function tradeCardHtml(t) {
         '<span class="mv ' + cls(m.ifTarget) + '">' +
         dollars(m.ifTarget) + '</span></div>' +
     '</div>' +
+    (m.sold ? '<div class="tr-part">נמכרו ' + m.sold + ' מתוך ' + t.qty +
+      ' · מומש <b class="' + cls(m.realised) + '">' + dollars(m.realised) +
+      '</b></div>' : '') +
     '<div class="tr-meta">כניסה ' + money(t.entry) +
-      (t.qty ? ' · ' + t.qty + ' מניות' : '') +
+      (t.qty ? ' · ' + (m.sold ? m.open + ' מתוך ' + t.qty : t.qty) +
+        ' מניות' : '') +
       ' · ' + esc(t.opened) +
       (t.stop >= t.entry ? ' · <b class="safe">מוגנת</b>' : '') + '</div>' +
     (t.note ? '<div class="tr-note">' + esc(t.note) + '</div>' : '') +
     movesHtml +
     (bad.length ? guardHtml(bad) : '') +
-    '<button class="btn ghost" style="margin-top:9px" onclick="closeTrade(' +
-      t.id + ')">סגור עסקה</button>' +
+    '<div class="frow" style="margin-top:9px">' +
+      (t.qty ? '<button class="btn ghost" onclick="sellPart(' + t.id +
+        ')">מכור חלק</button>' : '') +
+      '<button class="btn ghost" onclick="closeTrade(' + t.id +
+        ')">סגור עסקה</button>' +
+    '</div>' +
     '</div>';
 }
 
@@ -2023,7 +2131,7 @@ function renderJournal() {
     if (stat) stat.textContent = '';
     return;
   }
-  var rs = done.map(function (t) { return tradeR(t, t.exit); })
+  var rs = done.map(function (t) { return closedR(t); })
                .filter(function (v) { return v != null; });
   var wins = rs.filter(function (v) { return v > 0; }).length;
   var total = rs.reduce(function (a, v) { return a + v; }, 0);
@@ -2039,7 +2147,7 @@ function renderJournal() {
      actually paying, and it only exists because trades carry a tag. */
   var byTag = {};
   done.forEach(function (t) {
-    var r = tradeR(t, t.exit);
+    var r = closedR(t);
     if (r == null || !t.tag) return;
     (byTag[t.tag] = byTag[t.tag] || []).push(r);
   });
@@ -2076,7 +2184,7 @@ function renderJournal() {
     'מרוויח לך כסף.</div></div>' : '';
 
   box.innerHTML = tagHtml + done.slice(0, 30).map(function (t) {
-    var r = tradeR(t, t.exit);
+    var r = closedR(t);
     var got = tradeResult(t);
     return '<div class="jrow">' +
       '<span class="sym">' + esc(t.s) + '</span>' +
@@ -2584,7 +2692,7 @@ function loadTickers(force) {
   /* One request covers every file-backed tile, so the whole S&P/Nasdaq/
      bitcoin/gold/oil row costs a single same-origin GET that cannot be
      blocked by CORS or refused by somebody else's proxy. */
-  loadTickerFile();
+  loadTickerFile(true);   // loadTickers has already applied its own TTL
 
   /* Only the tiles with no server-side source left - VIX and USD/ILS - still
      go out through the proxy chain, spread apart so a proxy that does answer
@@ -2625,10 +2733,34 @@ function markFresh(at) {
   paintMktState();
 }
 
-/* The five tiles a runner fetches for us. Same origin, so this is the one
+/* Every symbol a runner prices for us. Same origin, so this is the one
    request on the home screen that no proxy outage and no CORS policy can
-   break. */
-function loadTickerFile() {
+   break.
+
+   checkAlerts calls this too, and it is called on every tab change, poll and
+   wake - so repeated calls inside FILE_TTL share one download rather than
+   each starting their own. */
+var FILE_TTL = 30000;
+var FILE_AT = 0;
+var FILE_PENDING = null;
+
+function loadTickerFile(force) {
+  if (!force) {
+    if (FILE_PENDING) return FILE_PENDING;
+    if (FILE_AT && Date.now() - FILE_AT < FILE_TTL) return Promise.resolve(null);
+  }
+  FILE_PENDING = loadTickerFileNow().then(function (d) {
+    FILE_PENDING = null;
+    FILE_AT = Date.now();
+    return d;
+  }, function (e) {
+    FILE_PENDING = null;
+    throw e;
+  });
+  return FILE_PENDING;
+}
+
+function loadTickerFileNow() {
   return fetch('data/tickers.json?t=' + Date.now(), { cache: 'no-store' })
     .then(function (r) {
       if (!r.ok) throw new Error('HTTP ' + r.status);
@@ -2650,6 +2782,23 @@ function loadTickerFile() {
         TK_CACHE[t[0]] = { p: q.p, c: q.c, t: at };
       });
       try { store.set(LS.tk, TK_CACHE); } catch (e) {}
+
+      /* The file carries the watchlist and open trades as well, so the same
+         download that paints the tiles also prices everything else on screen.
+         Only filled in where a live quote has not already beaten it, since a
+         proxy that happens to be working is fresher than a file rebuilt every
+         fifteen minutes. */
+      var painted = false;
+      watchedSymbols().forEach(function (sym) {
+        var q = quotes[sym];
+        if (!q || q.p == null) return;
+        if (PRICE_AT[sym] && PRICE_AT[sym] > at) return;
+        ALERT_PRICES[sym] = q.p;
+        PRICE_AT[sym] = at;
+        painted = true;
+      });
+      if (painted) { renderAlerts(); paintTrades(); renderWatchlist(); }
+
       if (d && d.marketStatus) MKT_STATE = d.marketStatus;
       markFresh(at);
       return d;
@@ -3033,7 +3182,22 @@ function alertsSyncJson() {
     if (a.tid) { o.tid = a.tid; o.kind = a.kind; }
     return o;
   });
-  return JSON.stringify({ alerts: list }, null, 2);
+
+  /* Everything below this line is a one-way hint to the runner, never read
+     back by pullAlerts: the phone stays authoritative for its own watchlist
+     and trades, which are far richer locally (notes, tags, high-water marks)
+     than anything worth round-tripping. The runner needs only enough to know
+     which symbols to price and what to say in the daily report. */
+  var positions = openTrades().map(function (t) {
+    return { s: t.s, entry: t.entry, qty: t.qty || null, stop: t.stop,
+             target: t.target == null ? null : t.target };
+  });
+
+  return JSON.stringify({
+    alerts: list,
+    watch: watchlist(),
+    positions: positions
+  }, null, 2);
 }
 
 function copyAlertsJson() {

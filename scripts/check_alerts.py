@@ -29,6 +29,17 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data")
 ALERTS = os.path.join(DATA, "alerts.json")
 STATE = os.path.join(DATA, "alert_state.json")
+TICKERS = os.path.join(DATA, "tickers.json")
+
+# build_tickers.py runs immediately before this in the same job and has
+# already priced every watched symbol. Reusing that instead of asking Nasdaq
+# again halves the requests and, more importantly, means the number an alert
+# fires on is the same number the app is showing.
+TICKERS_MAX_AGE = 20 * 60      # seconds; older than this and it is refetched
+
+MOVE_PCT = 3.0                 # a day's move worth interrupting someone for
+REPORT_HOUR = 17               # local Israel time
+REPORT_TZ = "Asia/Jerusalem"
 
 BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
               "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 "
@@ -158,6 +169,59 @@ def alert_key(a):
     return f"{a['s']}|{a['d']}|{a['p']}"
 
 
+def watch_list(raw):
+    """Symbols the phone is watching, written into alerts.json as a hint."""
+    out = []
+    for w in (raw.get("watch") or []) if isinstance(raw, dict) else []:
+        sym = str(w or "").strip().upper()
+        if sym and sym not in out:
+            out.append(sym)
+    return out
+
+
+def positions(raw):
+    """Open trades, enough of each to report a running P&L."""
+    out = []
+    for pos in (raw.get("positions") or []) if isinstance(raw, dict) else []:
+        if not isinstance(pos, dict):
+            continue
+        sym = str(pos.get("s") or "").strip().upper()
+        try:
+            entry = float(pos.get("entry"))
+        except (TypeError, ValueError):
+            continue
+        if not sym or entry <= 0:
+            continue
+        try:
+            qty = float(pos.get("qty")) if pos.get("qty") else None
+        except (TypeError, ValueError):
+            qty = None
+        out.append({"s": sym, "entry": entry, "qty": qty})
+    return out
+
+
+def prebuilt_quotes():
+    """{symbol: (price, pct)} from data/tickers.json, if it is fresh enough."""
+    raw = load_json(TICKERS, {})
+    if not isinstance(raw, dict) or not raw.get("quotes"):
+        return {}
+    try:
+        built = dt.datetime.fromisoformat(raw["generated"])
+    except Exception:
+        return {}
+    if built.tzinfo is None:
+        built = built.replace(tzinfo=dt.timezone.utc)
+    age = (dt.datetime.now(dt.timezone.utc) - built).total_seconds()
+    if age > TICKERS_MAX_AGE:
+        log(f"    tickers.json is {age / 60:.0f}m old - refetching instead")
+        return {}
+    out = {}
+    for sym, q in raw["quotes"].items():
+        if isinstance(q, dict) and q.get("p") is not None:
+            out[str(sym).upper()] = (q["p"], q.get("c"))
+    return out
+
+
 def normalise(raw):
     """Accept either {"alerts": [...]} or a bare list, and drop bad rows."""
     items = raw.get("alerts") if isinstance(raw, dict) else raw
@@ -191,6 +255,83 @@ def rearmed(alert, price):
     if alert["d"] == "above":
         return price < alert["p"] - margin
     return price > alert["p"] + margin
+
+
+def israel_now():
+    """Local time in Israel, which is what 17:00 means to the person reading.
+
+    Doing this by a fixed UTC offset would drift by an hour every time the
+    clocks change; zoneinfo gets it right in both directions.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.datetime.now(ZoneInfo(REPORT_TZ))
+    except Exception:
+        # No tz database on the runner: fall back to UTC+3 and accept being an
+        # hour early in winter rather than skipping the report entirely.
+        return dt.datetime.now(dt.timezone(dt.timedelta(hours=3)))
+
+
+def report_key(when=None):
+    return f"report|{(when or israel_now()).date().isoformat()}"
+
+
+def report_due(state, dry_run):
+    """True inside the 17:00 hour, once a day.
+
+    The checker runs every fifteen minutes, so this fires on whichever run
+    lands first in that hour and then stays quiet - the state key is the day,
+    not the run.
+    """
+    now = israel_now()
+    if now.hour != REPORT_HOUR:
+        return False
+    if dry_run:
+        return True
+    return report_key(now) not in state
+
+
+def money(v):
+    return f"{'+' if v >= 0 else '−'}${abs(v):,.2f}"
+
+
+def report_text(open_pos, prices, pcts):
+    """The 17:00 summary: how the positions stand, and how the market moved."""
+    lines = []
+
+    if open_pos:
+        total = 0.0
+        counted = False
+        for pos in open_pos:
+            price = prices.get(pos["s"])
+            if price is None:
+                lines.append(f"{pos['s']}: אין מחיר")
+                continue
+            per = price - pos["entry"]
+            pct = (per / pos["entry"]) * 100
+            if pos["qty"]:
+                dollars = per * pos["qty"]
+                total += dollars
+                counted = True
+                lines.append(f"{pos['s']}: {money(dollars)} ({pct:+.1f}%)")
+            else:
+                lines.append(f"{pos['s']}: {pct:+.1f}% למניה")
+        if counted and len(open_pos) > 1:
+            lines.append(f"סה״כ {money(total)}")
+    else:
+        lines.append("אין עסקאות פתוחות")
+
+    market = []
+    for sym, label in (("SPY", "S&P"), ("QQQ", "נאסד״ק")):
+        pct = pcts.get(sym)
+        if pct is not None:
+            market.append(f"{label} {pct:+.1f}%")
+        elif prices.get(sym) is not None:
+            market.append(f"{label} ${prices[sym]:,.2f}")
+    if market:
+        lines.append(" · ".join(market))
+
+    return f"סיכום {israel_now().strftime('%H:%M')}", "\n".join(lines)
 
 
 def notify(topic, title, message, tags, dry_run):
@@ -263,19 +404,35 @@ def main():
 
     raw = load_json(ALERTS, {})
     alerts = normalise(raw)
-    if not alerts:
-        log("No alerts defined; nothing to check.")
+    watched = watch_list(raw)
+    open_pos = positions(raw)
+    if not alerts and not watched and not open_pos:
+        log("Nothing defined - no alerts, no watchlist, no positions.")
         return 0
-    log(f"{len(alerts)} alert(s) to check")
+    log(f"{len(alerts)} alert(s), {len(watched)} watched, "
+        f"{len(open_pos)} position(s)")
 
     state = load_json(STATE, {})
     if not isinstance(state, dict):
         state = {}
 
     sess = session()
-    # One request per symbol, not per alert - several alerts can watch one.
-    prices, sources = {}, {}
-    for sym in sorted({a["s"] for a in alerts}):
+    # Prices come from the file build_tickers.py just wrote wherever possible,
+    # so the number an alert fires on is the number the app is showing.
+    prebuilt = prebuilt_quotes()
+    if prebuilt:
+        log(f"    reusing {len(prebuilt)} quote(s) from tickers.json")
+
+    prices, sources, pcts = {}, {}, {}
+    need = sorted({a["s"] for a in alerts}
+                  | set(watched)
+                  | {p["s"] for p in open_pos}
+                  | {"SPY", "QQQ"})          # the report always names these
+    for sym in need:
+        if sym in prebuilt:
+            prices[sym], pcts[sym] = prebuilt[sym]
+            sources[sym] = "live"
+            continue
         price, src = get_price(sess, sym)
         prices[sym], sources[sym] = price, src
         log(f"    {sym}: {price if price is not None else 'unavailable'}"
@@ -332,8 +489,62 @@ def main():
             # rather than treating an undelivered alert as delivered.
             failed += 1
 
+    # --- a big day, for anything on the watchlist -------------------------
+    today = dt.date.today().isoformat()
+    for sym in watched:
+        pct = pcts.get(sym)
+        price = prices.get(sym)
+        if pct is None or price is None:
+            continue
+        if abs(pct) < MOVE_PCT:
+            continue
+        # Keyed by the day, so one move is one notification however many times
+        # the checker runs afterwards while the stock stays up there.
+        key = f"move|{sym}|{today}"
+        if key in state:
+            continue
+        up = pct >= 0
+        ok = notify(
+            topic,
+            f"{sym} {pct:+.1f}%",
+            f"{sym} {'זינקה' if up else 'צנחה'} {abs(pct):.1f}% היום\n"
+            f"כעת ${price:,.2f}",
+            ["chart_with_upwards_trend" if up else "chart_with_downwards_trend"],
+            args.dry_run,
+        )
+        if ok:
+            sent += 1
+            state[key] = {"fired": now, "pct": pct}
+            changed = True
+            log(f"    MOVED {sym} {pct:+.2f}%")
+        else:
+            failed += 1
+
+    # --- the daily report -------------------------------------------------
+    if report_due(state, args.dry_run):
+        title, body = report_text(open_pos, prices, pcts)
+        if notify(topic, title, body, ["bar_chart"], args.dry_run):
+            sent += 1
+            state[report_key()] = {"sent": now}
+            changed = True
+            log("    daily report sent")
+        else:
+            failed += 1
+
     # An alert deleted from alerts.json should not leave its state behind.
-    for key in [k for k in state if k not in live_keys]:
+    # Only alert keys are pruned: the move and report keys are dated, not tied
+    # to any alert, and wiping them would re-send today's notifications on the
+    # next run.
+    for key in [k for k in state
+                if "|" in k and not k.startswith(("move|", "report|"))
+                and k not in live_keys]:
+        del state[key]
+        changed = True
+
+    # Dated keys are pruned by age instead, so the file cannot grow forever.
+    cutoff = (dt.date.today() - dt.timedelta(days=7)).isoformat()
+    for key in [k for k in state
+                if k.startswith(("move|", "report|")) and k.rsplit("|", 1)[-1] < cutoff]:
         del state[key]
         changed = True
 

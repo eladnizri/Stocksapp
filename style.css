@@ -1077,3 +1077,14 @@ a.btn { display: block; text-decoration: none; }
 .sgn.on {
   color: #fff; background: var(--alert); border-color: var(--alert);
 }
+
+/* What a scaled-out position has already banked, kept visually apart from the
+   open portion's running P&L so the two are never read as one number. */
+.tr-part {
+  margin-top: 8px; font-size: .74rem; color: var(--ink-2);
+  background: var(--surface-2); border-radius: var(--r-sm);
+  padding: 6px 9px;
+}
+.tr-part b { font-variant-numeric: tabular-nums; }
+.tr-part b.up { color: var(--gain); }
+.tr-part b.down { color: var(--loss); }

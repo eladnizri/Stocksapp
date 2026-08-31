@@ -55,6 +55,19 @@ jobs:
       - name: Install requests
         run: pip install --quiet requests
 
+      # Runs BEFORE the alert check on purpose: it prices every watched
+      # symbol once, and check_alerts.py then reads those numbers instead of
+      # asking Nasdaq again. Half the requests, and the price an alert fires
+      # on is identical to the one the app displays.
+      # Rides along with the alert check rather than getting a schedule of its
+      # own: this job already has to run on time for alerts to work at all, and
+      # a second cron would be a second thing that can silently stop firing.
+      # Skipped for --probe, which is only meant to test one symbol and stop.
+      - name: Refresh watched prices
+        if: ${{ !inputs.probe }}
+        continue-on-error: true
+        run: python scripts/build_tickers.py
+
       - name: Check alerts
         id: check
         env:
@@ -67,15 +80,6 @@ jobs:
           python scripts/check_alerts.py \
             ${{ inputs.probe && format('--probe {0}', inputs.probe) || '' }} \
             ${{ inputs.dry_run && '--dry-run' || '' }}
-
-      # Rides along with the alert check rather than getting a schedule of its
-      # own: this job already has to run on time for alerts to work at all, and
-      # a second cron would be a second thing that can silently stop firing.
-      # Skipped for --probe, which is only meant to test one symbol and stop.
-      - name: Refresh home-screen tickers
-        if: ${{ !inputs.probe }}
-        continue-on-error: true
-        run: python scripts/build_tickers.py
 
       - name: Commit fired state
         if: ${{ !inputs.dry_run }}

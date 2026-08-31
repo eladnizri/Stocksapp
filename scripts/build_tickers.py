@@ -39,9 +39,43 @@ BROWSER_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 
 # Symbol -> what the tile stands for. Kept here rather than in the app so the
 # two cannot drift: the app renders whatever this file contains.
-SYMBOLS = ["SPY", "QQQ", "IBIT", "GLD", "USO"]
+TILES = ["SPY", "QQQ", "IBIT", "GLD", "USO"]
 
-FETCH_DELAY = 0.3
+ALERTS = os.path.join(DATA, "alerts.json")
+MAX_SYMBOLS = 60          # a runaway watchlist should not stall the job
+FETCH_DELAY = 0.25
+
+
+def watched_symbols():
+    """Everything the phone shows a live price for, from the file it syncs.
+
+    The five tiles are always fetched. Beyond them the app writes its
+    watchlist and open positions into data/alerts.json - the same file the
+    alert checker already reads - so the runner can price those too. Before
+    this, a watchlist symbol was still fetched on the phone through the CORS
+    proxies, which is exactly the path that failed.
+    """
+    syms = list(TILES)
+    try:
+        with open(ALERTS) as fh:
+            raw = json.load(fh)
+    except Exception:
+        return syms
+
+    def add(sym):
+        sym = str(sym or "").strip().upper()
+        if sym and sym not in syms:
+            syms.append(sym)
+
+    for a in (raw.get("alerts") or []):
+        if isinstance(a, dict):
+            add(a.get("s"))
+    for w in (raw.get("watch") or []):
+        add(w)
+    for pos in (raw.get("positions") or []):
+        if isinstance(pos, dict):
+            add(pos.get("s"))
+    return syms[:MAX_SYMBOLS]
 
 
 def log(msg):
@@ -67,40 +101,54 @@ def to_num(s):
         return None
 
 
-def quote(sess, symbol):
-    """(price, pct_change, market_status). None price if it did not answer."""
+def quote_one(sess, symbol, assetclass):
     url = (f"https://api.nasdaq.com/api/quote/{symbol}/info"
-           f"?assetclass=etf")
+           f"?assetclass={assetclass}")
     try:
         r = sess.get(url, timeout=20)
     except Exception as e:
-        log(f"    {symbol}: {type(e).__name__}")
-        return None, None, ""
+        return None, None, "", type(e).__name__
     if r.status_code != 200:
-        log(f"    {symbol}: HTTP {r.status_code}")
-        return None, None, ""
+        return None, None, "", f"HTTP {r.status_code}"
     try:
         data = r.json().get("data") or {}
     except Exception:
-        log(f"    {symbol}: non-JSON response")
-        return None, None, ""
+        return None, None, "", "non-JSON"
     pd = data.get("primaryData") or {}
-    price = to_num(pd.get("lastSalePrice"))
-    pct = to_num(pd.get("percentageChange"))
-    status = data.get("marketStatus") or ""
-    if price is None:
-        log(f"    {symbol}: no price in response")
-        return None, None, status
-    log(f"    {symbol}: {price} ({pct:+.2f}%)" if pct is not None
-        else f"    {symbol}: {price}")
-    return price, pct, status
+    return (to_num(pd.get("lastSalePrice")), to_num(pd.get("percentageChange")),
+            data.get("marketStatus") or "", "")
+
+
+def quote(sess, symbol):
+    """(price, pct_change, market_status). None price if nothing answered.
+
+    Nasdaq partitions by asset class and returns nothing at all for the wrong
+    one, so a watchlist of ordinary stocks needs "stocks" while the tiles need
+    "etf". Tiles are known ETFs; everything else tries stocks first, since
+    that is what a watchlist mostly holds.
+    """
+    order = ("etf", "stocks") if symbol in TILES else ("stocks", "etf")
+    why = ""
+    for assetclass in order:
+        price, pct, status, err = quote_one(sess, symbol, assetclass)
+        why = why or err
+        if price is not None:
+            log(f"    {symbol}: {price}" +
+                (f" ({pct:+.2f}%)" if pct is not None else "") +
+                (f" [{assetclass}]" if assetclass != order[0] else ""))
+            return price, pct, status
+        time.sleep(FETCH_DELAY)
+    log(f"    {symbol}: unavailable{(' - ' + why) if why else ''}")
+    return None, None, ""
 
 
 def main():
     sess = session()
+    symbols = watched_symbols()
+    log(f"{len(symbols)} symbol(s): {', '.join(symbols)}")
     quotes = {}
     status = ""
-    for sym in SYMBOLS:
+    for sym in symbols:
         price, pct, st = quote(sess, sym)
         if price is not None:
             quotes[sym] = {"p": price, "c": pct}
@@ -126,8 +174,8 @@ def main():
         json.dump(payload, fh, indent=1, sort_keys=True)
         fh.write("\n")
 
-    missing = [s for s in SYMBOLS if s not in quotes]
-    log(f"Wrote {len(quotes)}/{len(SYMBOLS)} quotes, market {status or '?'}"
+    missing = [s for s in symbols if s not in quotes]
+    log(f"Wrote {len(quotes)}/{len(symbols)} quotes, market {status or '?'}"
         + (f"; missing: {', '.join(missing)}" if missing else ""))
     return 0
 
