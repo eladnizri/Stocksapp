@@ -125,30 +125,65 @@ var PROXIES = [
 ];
 var bestProxy = parseInt(store.get(LS.proxy, 0), 10) || 0;
 
-/* Yahoo sets no CORS headers for browsers, so fall through a proxy list and
-   remember whichever one worked last. */
+/* How long a candidate proxy gets before the next one starts alongside it,
+   without waiting to see whether the first one fails. */
+var HEDGE_MS = 1500;
+
+/* Yahoo sets no CORS headers for browsers, so this goes through a public
+   CORS proxy. Trying them one at a time - wait out the full timeout, then
+   try the next - was the actual cause of a two-minute wait for one number:
+   any proxy having a slow day (overloaded, rate-limiting, just far away)
+   made every request behind it in the queue pay that same timeout before
+   getting a turn. Racing them instead - start the next candidate on a timer
+   regardless of whether the current one has answered, take whichever
+   responds first, abort the rest - bounds the wait to whichever proxy is
+   actually fastest right now, not the sum of every dead one tried first. */
 function fetchRaw(url, timeoutMs) {
+  timeoutMs = timeoutMs || 6000;
   var order = [bestProxy];
   for (var i = 0; i < PROXIES.length; i++) if (i !== bestProxy) order.push(i);
 
-  var attempt = function (idx) {
-    if (idx >= order.length) return Promise.reject(new Error('כל המקורות נכשלו'));
-    var pi = order[idx];
-    var ctrl = new AbortController();
-    var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs || 9000);
-    return fetch(PROXIES[pi](url), { cache: 'no-store', signal: ctrl.signal })
-      .then(function (r) {
-        clearTimeout(timer);
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.text();
-      })
-      .then(function (txt) {
-        if (pi !== bestProxy) { bestProxy = pi; store.set(LS.proxy, pi); }
-        return txt;
-      })
-      .catch(function () { clearTimeout(timer); return attempt(idx + 1); });
-  };
-  return attempt(0);
+  return new Promise(function (resolve, reject) {
+    var settled = false;
+    var controllers = [];
+    var started = {};
+    var pending = order.length;
+
+    function tryAt(idx) {
+      if (idx >= order.length || settled || started[idx]) return;
+      started[idx] = true;
+      var pi = order[idx];
+      var ctrl = new AbortController();
+      controllers.push(ctrl);
+      var timer = setTimeout(function () { ctrl.abort(); }, timeoutMs);
+
+      fetch(PROXIES[pi](url), { cache: 'no-store', signal: ctrl.signal })
+        .then(function (r) {
+          clearTimeout(timer);
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.text();
+        })
+        .then(function (txt) {
+          if (settled) return;
+          settled = true;
+          if (pi !== bestProxy) { bestProxy = pi; store.set(LS.proxy, pi); }
+          controllers.forEach(function (c) { c.abort(); });   // stop the losers
+          resolve(txt);
+        })
+        .catch(function () {
+          clearTimeout(timer);
+          pending--;
+          if (settled) return;
+          if (pending === 0) { reject(new Error('כל המקורות נכשלו')); return; }
+          tryAt(idx + 1);   // this one is done failing - no reason to also wait out its hedge timer
+        });
+
+      if (idx + 1 < order.length) {
+        setTimeout(function () { tryAt(idx + 1); }, HEDGE_MS);
+      }
+    }
+    tryAt(0);
+  });
 }
 
 function yahooQuote(sym) {
