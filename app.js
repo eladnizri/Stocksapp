@@ -215,6 +215,40 @@ function yahooQuote(sym) {
   });
 }
 
+/* Nasdaq's own quote API, reached directly - no proxy, because Nasdaq sets
+   real CORS headers on it. Only usable for symbols Nasdaq actually quotes
+   (stocks and ETFs), which is why this exists alongside yahooQuote rather
+   than replacing it: an index level, a forex pair or a futures contract has
+   no Nasdaq listing to ask about. */
+function nasdaqNum(s) {
+  if (s == null) return null;
+  var n = parseFloat(String(s).replace(/[^0-9.-]/g, ''));
+  return isNaN(n) ? null : n;
+}
+function nasdaqQuote(sym) {
+  var url = 'https://api.nasdaq.com/api/quote/' + encodeURIComponent(sym) +
+    '/info?assetclass=etf&_=' + Date.now();
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, 6000);
+  return fetch(url, {
+    cache: 'no-store', signal: ctrl.signal,
+    headers: { 'Accept': 'application/json' }
+  }).then(function (r) {
+    clearTimeout(timer);
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }).then(function (d) {
+    var pd = (d && d.data && d.data.primaryData) || {};
+    var price = nasdaqNum(pd.lastSalePrice);
+    if (price == null) throw new Error('אין נתונים');
+    return {
+      price: price,
+      chgPct: nasdaqNum(pd.percentageChange),
+      state: (d && d.data && d.data.marketStatus) || ''
+    };
+  }).catch(function (e) { clearTimeout(timer); throw e; });
+}
+
 /* --------------------------------------------------------------- snapshot */
 var SNAP = null;
 var SNAP_BY_SYM = {};
@@ -2445,18 +2479,29 @@ function runScreen() {
 }
 
 /* ------------------------------------------------------------------ home */
-/* Raw Yahoo symbols - yahooQuote() percent-encodes them, so pre-encoding the
-   caret here would double-escape it and every index request would 404. */
+/* Yahoo's chart API - the only place VIX and USD/ILS come from - is only
+   reachable through public CORS proxies, and all three the app knows about
+   failed at once: two timed out completely, the third now demands a paid
+   API key it does not have. Wherever a liquid ETF tracks the same thing
+   closely enough, that entry goes through Nasdaq's quote API instead,
+   which sets real CORS headers and needs no proxy at all - the same source
+   check_alerts.py already relies on for every price alert. VIX and the
+   shekel have no such ETF and stay on the Yahoo path, so they still show
+   nothing while all three proxies are down; that is an honest "no source
+   available" rather than a wrong number.
+   Row shape: [symbol, label, decimals, source]. source is 'nasdaq' (direct,
+   no proxy - assetclass is always etf for every symbol used here) or
+   'yahoo' (through fetchRaw's proxy chain). */
 var TICKERS = [
-  ['^GSPC', 'S&P 500', 0],
-  ['^IXIC', 'נאסד״ק', 0],
-  ['^VIX', 'VIX', 2],
-  ['BTC-USD', 'ביטקוין', 0]
+  ['SPY', 'S&P 500 (SPY)', 2, 'nasdaq'],
+  ['QQQ', 'נאסד״ק (QQQ)', 2, 'nasdaq'],
+  ['^VIX', 'VIX', 2, 'yahoo'],
+  ['IBIT', 'ביטקוין (IBIT)', 2, 'nasdaq']
 ];
 var TICKERS_MINI = [
-  ['USDILS=X', 'דולר / שקל', 3],
-  ['GC=F', 'זהב', 0],
-  ['CL=F', 'נפט', 2]
+  ['USDILS=X', 'דולר / שקל', 3, 'yahoo'],
+  ['GLD', 'זהב (GLD)', 2, 'nasdaq'],
+  ['USO', 'נפט (USO)', 2, 'nasdaq']
 ];
 
 function tkId(sym) { return 'tk-' + sym.replace(/[^A-Za-z0-9]/g, ''); }
@@ -2475,14 +2520,24 @@ var MKT_STATE = '';
    show the last real numbers instead of a blank skeleton. */
 var TK_CACHE = store.get(LS.tk, {});
 
-var MKT_STATE_HE = {
-  PRE: 'טרום מסחר',
-  REGULAR: 'השוק פתוח',
-  POST: 'אחרי הנעילה',
-  POSTPOST: 'השוק סגור',
-  PREPRE: 'השוק סגור',
-  CLOSED: 'השוק סגור'
-};
+/* Yahoo reports state as an all-caps enum (REGULAR, PRE, POST, CLOSED, ...);
+   Nasdaq reports it as a capitalized phrase ("Open", "Closed", ...). Match
+   both by substring on the lowercased value instead of keeping two lookup
+   tables in sync with whichever source happens to answer this round. */
+function marketStateLabel(raw) {
+  var s = String(raw || '').toLowerCase();
+  if (!s) return '';
+  /* Checked before the plain pre/post match below: Yahoo's PREPRE and
+     POSTPOST mean the market is fully closed, outside even the extended
+     session - not "still in pre-market"/"still after hours". */
+  if (s === 'prepre' || s === 'postpost' || s.indexOf('closed') >= 0) {
+    return 'השוק סגור';
+  }
+  if (s.indexOf('pre') >= 0) return 'טרום מסחר';
+  if (s.indexOf('after') >= 0 || s.indexOf('post') >= 0) return 'אחרי הנעילה';
+  if (s.indexOf('open') >= 0 || s === 'regular') return 'השוק פתוח';
+  return '';
+}
 
 function buildTickers() {
   var box = $('#tickers');
@@ -2560,14 +2615,17 @@ function loadTickers(force) {
   var ok = 0, done = 0;
   all.forEach(function (t, i) {
     setTimeout(function () {
-      yahooQuote(t[0]).then(function (q) {
+      var fetchQuote = t[3] === 'nasdaq' ? nasdaqQuote : yahooQuote;
+      fetchQuote(t[0]).then(function (q) {
         paintTicker(t, q);
         if (q && q.price != null) {
           ok++;
           TK_CACHE[t[0]] = { p: q.price, c: q.chgPct, t: Date.now() };
           try { store.set(LS.tk, TK_CACHE); } catch (e) {}
           TICKERS_OK = Date.now();
-          if (t[0] === '^GSPC' && q.state) MKT_STATE = q.state;
+          // The first tile is always the app's primary index, whichever
+          // symbol and source currently back it.
+          if (i === 0 && q.state) MKT_STATE = q.state;
           paintMktState();
         }
       }).catch(function () { paintTicker(t, null); }).then(function () {
@@ -2592,7 +2650,7 @@ function paintMktState() {
   var el = $('#mktState');
   if (!el) return;
   if (!TICKERS_OK) { el.textContent = 'טוען…'; return; }
-  var txt = MKT_STATE_HE[MKT_STATE] || '';
+  var txt = marketStateLabel(MKT_STATE);
   txt += (txt ? ' · ' : '') + 'עודכן ' +
     new Date(TICKERS_OK).toLocaleTimeString('he-IL',
       { hour: '2-digit', minute: '2-digit' });
