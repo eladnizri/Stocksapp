@@ -291,6 +291,65 @@ def report_due(state, dry_run):
     return report_key(now) not in state
 
 
+EARNINGS_WINDOW = 2   # days out; 0/1/2 all count as "coming up"
+
+
+def earnings_calendar(sess, symbols):
+    """{symbol: {"d": date, "eps": str|None, "t": "pre"|"post"|None}} for
+    whichever of `symbols` report within EARNINGS_WINDOW days from today.
+
+    Nasdaq's calendar is keyed by day and lists every company reporting that
+    day, so three requests - today, tomorrow, the day after - cover the whole
+    watchlist regardless of how many symbols are in it. This is the same
+    endpoint build_snapshot.py already trusts for the nightly scan; the only
+    difference is the horizon, three days instead of eighty, because a heads
+    up further out than that is not yet actionable.
+    """
+    wanted = set(symbols)
+    if not wanted:
+        return {}
+    out = {}
+    today = dt.date.today()
+    for offset in range(EARNINGS_WINDOW + 1):
+        day = today + dt.timedelta(days=offset)
+        try:
+            r = sess.get(
+                "https://api.nasdaq.com/api/calendar/earnings"
+                f"?date={day.isoformat()}", timeout=20)
+            if r.status_code != 200:
+                continue
+            rows = ((r.json().get("data") or {}).get("rows")) or []
+        except Exception:
+            continue
+        for row in rows:
+            sym = str(row.get("symbol", "")).upper().replace(".", "-")
+            if sym not in wanted or sym in out:   # keep the soonest date
+                continue
+            rec = {"d": day.isoformat()}
+            eps = (row.get("epsForecast") or "").strip()
+            if eps:
+                rec["eps"] = eps
+            when = row.get("time") or ""
+            if "pre" in when:
+                rec["t"] = "pre"
+            elif "after" in when:
+                rec["t"] = "post"
+            out[sym] = rec
+        time.sleep(FETCH_DELAY)
+    return out
+
+
+def earnings_when(iso_date):
+    """'היום' / 'מחר' / 'בעוד יומיים', so the notification reads naturally
+    rather than making the person do date arithmetic in their head."""
+    delta = (dt.date.fromisoformat(iso_date) - dt.date.today()).days
+    if delta <= 0:
+        return "היום"
+    if delta == 1:
+        return "מחר"
+    return f"בעוד {delta} ימים"
+
+
 def money(v):
     return f"{'+' if v >= 0 else '−'}${abs(v):,.2f}"
 
@@ -520,6 +579,35 @@ def main():
         else:
             failed += 1
 
+    # --- earnings coming up, for anything held or watched -----------------
+    er_syms = {a["s"] for a in alerts} | set(watched) | {p["s"] for p in open_pos}
+    for sym, er in earnings_calendar(sess, er_syms).items():
+        # Keyed by the report date itself, not by how many days out it is, so
+        # this fires exactly once per report - whichever run first sees it
+        # inside the window - rather than once a day as it counts down.
+        key = f"earnings|{sym}|{er['d']}"
+        if key in state:
+            continue
+        when_word = earnings_when(er["d"])
+        session_word = {"pre": " (לפני הפתיחה)", "post": " (אחרי הנעילה)"}.get(er.get("t"), "")
+        eps_line = f"\nתחזית EPS: {er['eps']}" if er.get("eps") else ""
+        held = sym in {p["s"] for p in open_pos}
+        ok = notify(
+            topic,
+            f"{sym} מדווחת {when_word}",
+            f"{sym} מדווחת רבעון {when_word}{session_word}\n"
+            f"{'יש לך פוזיציה פתוחה' if held else 'ברשימת המעקב שלך'}{eps_line}",
+            ["loudspeaker"],
+            args.dry_run,
+        )
+        if ok:
+            sent += 1
+            state[key] = {"fired": now, "d": er["d"]}
+            changed = True
+            log(f"    EARNINGS {sym} on {er['d']}")
+        else:
+            failed += 1
+
     # --- the daily report -------------------------------------------------
     if report_due(state, args.dry_run):
         title, body = report_text(open_pos, prices, pcts)
@@ -532,11 +620,11 @@ def main():
             failed += 1
 
     # An alert deleted from alerts.json should not leave its state behind.
-    # Only alert keys are pruned: the move and report keys are dated, not tied
-    # to any alert, and wiping them would re-send today's notifications on the
-    # next run.
+    # Only alert keys are pruned: the move, report and earnings keys are
+    # dated, not tied to any alert, and wiping them would re-send today's
+    # notifications on the next run.
     for key in [k for k in state
-                if "|" in k and not k.startswith(("move|", "report|"))
+                if "|" in k and not k.startswith(("move|", "report|", "earnings|"))
                 and k not in live_keys]:
         del state[key]
         changed = True
@@ -544,7 +632,8 @@ def main():
     # Dated keys are pruned by age instead, so the file cannot grow forever.
     cutoff = (dt.date.today() - dt.timedelta(days=7)).isoformat()
     for key in [k for k in state
-                if k.startswith(("move|", "report|")) and k.rsplit("|", 1)[-1] < cutoff]:
+                if k.startswith(("move|", "report|", "earnings|"))
+                and k.rsplit("|", 1)[-1] < cutoff]:
         del state[key]
         changed = True
 

@@ -270,8 +270,11 @@ const PING_GAP = 10 * 60 * 1000;   // least time between two manual pings
    Yahoo fails and both Nasdaq asset classes are tried - so a long watchlist
    could quietly run out partway and drop the symbols at the end. Spending a
    declared budget, alert symbols first, makes what gets dropped a decision
-   rather than an accident. */
-const CALL_BUDGET = 44;
+   rather than an accident. Left smaller than the ceiling on purpose: the
+   alerts.json fetch, the earnings calendar (up to three days) and the
+   notifications themselves all draw from the same 50, outside this budget. */
+const CALL_BUDGET = 40;
+const EARNINGS_WINDOW = 2;   // days out; 0/1/2 all count as "coming up"
 
 function alertsUrl(env) {
   return (env && env.ALERTS_URL || '').trim() ||
@@ -362,6 +365,58 @@ const dollars = (v) => '$' + v.toLocaleString('en-US',
   { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const pctStr = (v) => (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(1) + '%';
+
+const isoDate = (d) => d.toISOString().slice(0, 10);
+const addDays = (d, n) => new Date(d.getTime() + n * 86400000);
+
+/* {symbol: {d, eps?, t?}} for whichever of `symbols` report within
+   EARNINGS_WINDOW days from today. Nasdaq's calendar is keyed by day and
+   lists every company reporting that day, so three requests - today,
+   tomorrow, the day after - cover the whole watchlist regardless of how many
+   symbols are in it. Same endpoint scripts/build_snapshot.py already trusts
+   for the nightly scan; the horizon here is three days instead of eighty,
+   because a heads-up further out than that is not yet actionable. */
+async function earningsCalendar(symbols) {
+  const wanted = new Set(symbols);
+  if (!wanted.size) return {};
+  const out = {};
+  const base = new Date();
+  for (let offset = 0; offset <= EARNINGS_WINDOW; offset++) {
+    const day = isoDate(addDays(base, offset));
+    try {
+      const r = await fetch(
+        'https://api.nasdaq.com/api/calendar/earnings?date=' + day,
+        { headers: { 'User-Agent': UA, Accept: 'application/json' },
+          signal: withTimeout(UPSTREAM_TIMEOUT) });
+      if (!r.ok) continue;
+      const d = await r.json();
+      const rows = (d && d.data && d.data.rows) || [];
+      for (const row of rows) {
+        const sym = String(row.symbol || '').toUpperCase().replace(/\./g, '-');
+        if (!wanted.has(sym) || out[sym]) continue;   // keep the soonest date
+        const rec = { d: day };
+        const eps = String(row.epsForecast || '').trim();
+        if (eps) rec.eps = eps;
+        const when = String(row.time || '');
+        if (when.includes('pre')) rec.t = 'pre';
+        else if (when.includes('after')) rec.t = 'post';
+        out[sym] = rec;
+      }
+    } catch (e) { /* one bad day must not stop the rest */ }
+  }
+  return out;
+}
+
+/* 'היום' / 'מחר' / 'בעוד N ימים', so the notification reads naturally rather
+   than making the person do date arithmetic in their head. */
+function earningsWhen(iso) {
+  const today = isoDate(new Date());
+  const delta = Math.round(
+    (new Date(iso + 'T00:00:00Z') - new Date(today + 'T00:00:00Z')) / 86400000);
+  if (delta <= 0) return 'היום';
+  if (delta === 1) return 'מחר';
+  return `בעוד ${delta} ימים`;
+}
 
 /* The 17:00 summary: how the open positions stand, and how the market moved. */
 function reportText(open, prices, pcts) {
@@ -461,15 +516,16 @@ async function ping(env) {
 }
 
 /* An alert deleted in the app should not leave its state behind. Only alert
-   keys are pruned by liveness: the move and report keys are dated rather than
-   tied to any alert, and wiping those would re-send today's notifications on
-   the very next run. They age out instead, so the store cannot grow forever. */
+   keys are pruned by liveness: the move, report and earnings keys are dated
+   rather than tied to any alert, and wiping those would re-send today's
+   notifications on the very next run. They age out instead, so the store
+   cannot grow forever. */
 function pruneState(state, alerts) {
   const live = new Set(alerts.map(alertKey));
   const cutoff = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
   let changed = false;
   for (const k of Object.keys(state)) {
-    const dated = k.startsWith('move|') || k.startsWith('report|');
+    const dated = k.startsWith('move|') || k.startsWith('report|') || k.startsWith('earnings|');
     const stale = dated ? k.split('|').pop() < cutoff
                         : k.includes('|') && !live.has(k);
     if (stale) { delete state[k]; changed = true; }
@@ -606,6 +662,36 @@ async function runAlerts(env, opt) {
       out.sent += 1;
       out.moved.push({ s: sym, pct });
       state[key] = { fired: now, pct };
+      changed = true;
+    } else {
+      out.failed += 1;
+    }
+  }
+
+  // Earnings coming up, for anything held or watched.
+  const erSyms = new Set([...alerts.map((a) => a.s), ...open.map((p) => p.s),
+                          ...watched]);
+  const heldSet = new Set(open.map((p) => p.s));
+  for (const [sym, er] of Object.entries(await earningsCalendar(erSyms))) {
+    // Keyed by the report date itself, not by how many days out it is, so
+    // this fires exactly once per report - whichever run first sees it
+    // inside the window - rather than once a day as it counts down.
+    const key = `earnings|${sym}|${er.d}`;
+    if (state[key]) continue;
+    const whenWord = earningsWhen(er.d);
+    const sessionWord = er.t === 'pre' ? ' (לפני הפתיחה)'
+                       : er.t === 'post' ? ' (אחרי הנעילה)' : '';
+    const epsLine = er.eps ? `\nתחזית EPS: ${er.eps}` : '';
+    const held = heldSet.has(sym);
+    const sent = await notify(env, topic, `${sym} מדווחת ${whenWord}`,
+      `${sym} מדווחת רבעון ${whenWord}${sessionWord}\n` +
+      `${held ? 'יש לך פוזיציה פתוחה' : 'ברשימת המעקב שלך'}${epsLine}`,
+      ['loudspeaker'], dry);
+    if (sent) {
+      out.sent += 1;
+      out.earnings = out.earnings || [];
+      out.earnings.push({ s: sym, d: er.d });
+      state[key] = { fired: now, d: er.d };
       changed = true;
     } else {
       out.failed += 1;
