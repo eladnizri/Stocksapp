@@ -225,48 +225,141 @@ function yahooQuote(sym) {
  *
  * Yahoo and Nasdaq both refuse to send a CORS header, so a browser can never
  * read either of them directly, and the public proxies that used to bridge
- * that failed together. worker/quotes.js is our own hop: it does the fetching
- * server-side, where CORS does not apply, and answers with a header that lets
- * the page read it. Symbols go up, prices come back, and nothing in between
- * belongs to anybody else.
+ * that failed together. That much was measured. What was NOT measured, and
+ * was wrongly assumed for a while, is that no quote API at all is readable
+ * from a page - several are, and they were simply never tried:
  *
- * Until one is deployed this returns nothing and every caller falls back to
- * the repo file, so the app degrades to where it was rather than breaking. */
+ *   Finnhub            Access-Control-Allow-Origin: *   free key, 60/min
+ *   Frankfurter        Access-Control-Allow-Origin: *   no key at all
+ *
+ * So there are two ways to give the app live prices, and this file supports
+ * both from a single setting:
+ *
+ *   a Finnhub key   - one signup, paste the key, done. Covers every stock
+ *                     and ETF, which is everything the app charts.
+ *   a Worker URL    - worker/quotes.js on Cloudflare. More setup, but it also
+ *                     carries indices and runs the alert schedule.
+ *
+ * Whichever is configured, USD/ILS comes from Frankfurter, which needs no
+ * key from anyone. With neither configured the app falls back to the repo
+ * file, exactly as before. */
+
+var FOREX_SYMS = { 'USDILS=X': ['USD', 'ILS'] };
+
+/* Either a Worker URL or a Finnhub key, told apart by shape rather than by
+   asking the person to declare which one they pasted. A key cannot begin
+   with https:// and a URL always does. */
+function quoteSource() {
+  var v = String(store.get(LS.api, '') || '').trim();
+  if (!v) return { kind: 'none' };
+  if (/^https?:\/\//i.test(v)) {
+    return { kind: 'worker', url: v.replace(/\/+$/, '') };
+  }
+  return { kind: 'finnhub', key: v };
+}
+
+/* The worker URL specifically - call sites that batch through /q. */
 function quoteApi() {
-  var u = String(store.get(LS.api, '') || '').trim().replace(/\/+$/, '');
-  return /^https:\/\//.test(u) ? u : '';
+  var src = quoteSource();
+  return src.kind === 'worker' && /^https:\/\//.test(src.url) ? src.url : '';
+}
+
+function hasQuoteSource() {
+  return quoteSource().kind !== 'none';
 }
 
 var QUOTE_BATCH = 25;        // matches MAX_SYMBOLS in the worker
+var FINNHUB_MAX = 30;        // per refresh, to stay inside 60 calls a minute
+
+function getJson(url, ms) {
+  var ctrl = new AbortController();
+  var timer = setTimeout(function () { ctrl.abort(); }, ms || 9000);
+  return fetch(url, { signal: ctrl.signal, cache: 'no-store' })
+    .then(function (r) {
+      clearTimeout(timer);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .catch(function (e) { clearTimeout(timer); throw e; });
+}
+
+/* USD/ILS from Frankfurter. Keyless, CORS-enabled, and the only source in the
+   app that needs no setup whatsoever - so this tile works on a fresh install
+   before anything has been configured. It quotes one rate a day rather than
+   tick by tick, which for a shekel reference is all anyone reads it for. */
+function forexQuote(sym) {
+  var pair = FOREX_SYMS[sym];
+  if (!pair) return Promise.resolve(null);
+  return getJson('https://api.frankfurter.app/latest?from=' + pair[0] +
+                 '&to=' + pair[1], 7000)
+    .then(function (d) {
+      var v = d && d.rates && d.rates[pair[1]];
+      return v == null ? null : { p: v, c: null, n: pair[0] + '/' + pair[1] };
+    })
+    .catch(function () { return null; });
+}
+
+/* One symbol from Finnhub. c is the last price and dp the day's percent; a
+   zero c is how it reports a symbol it does not carry, so that is treated as
+   no answer rather than as a stock worth nothing. */
+function finnhubQuote(sym, key) {
+  return getJson('https://finnhub.io/api/v1/quote?symbol=' +
+                 encodeURIComponent(sym) + '&token=' + encodeURIComponent(key), 8000)
+    .then(function (d) {
+      if (!d || !d.c) return null;
+      return { p: d.c, c: d.dp == null ? null : d.dp, n: '', st: '' };
+    })
+    .catch(function () { return null; });
+}
 
 /* Asks for many symbols at once: the home screen's seven, or a whole
-   watchlist, cost one request rather than one each. */
+   watchlist. A worker takes them in one request; Finnhub is one call per
+   symbol, which its 60-a-minute allowance covers comfortably. */
 function quoteMany(syms) {
-  var api = quoteApi();
   var list = (syms || []).filter(Boolean);
-  if (!api || !list.length) return Promise.resolve({});
+  if (!list.length) return Promise.resolve({});
+  var src = quoteSource();
 
-  var chunks = [];
-  for (var i = 0; i < list.length; i += QUOTE_BATCH) {
-    chunks.push(list.slice(i, i + QUOTE_BATCH));
+  /* Split off anything with a keyless source of its own, so it resolves even
+     when nothing at all has been set up. */
+  var forex = list.filter(function (s) { return FOREX_SYMS[s]; });
+  var rest = list.filter(function (s) { return !FOREX_SYMS[s]; });
+  if (src.kind === 'worker') { forex = []; rest = list; }
+
+  var jobs = [Promise.all(forex.map(function (s) {
+    return forexQuote(s).then(function (q) { return [s, q]; });
+  }))];
+
+  if (src.kind === 'worker' && rest.length) {
+    var chunks = [];
+    for (var i = 0; i < rest.length; i += QUOTE_BATCH) {
+      chunks.push(rest.slice(i, i + QUOTE_BATCH));
+    }
+    jobs.push(Promise.all(chunks.map(function (part) {
+      return getJson(src.url + '/q?s=' + encodeURIComponent(part.join(',')), 9000)
+        .then(function (d) {
+          var o = (d && d.quotes) || {};
+          return Object.keys(o).map(function (k) { return [k, o[k]]; });
+        })
+        .catch(function () { return []; });
+    })).then(function (parts) {
+      return parts.reduce(function (a, b) { return a.concat(b); }, []);
+    }));
+  } else if (src.kind === 'finnhub' && rest.length) {
+    /* Finnhub carries stocks and ETFs. It has no index feed on the free tier,
+       so ^VIX is left without an answer rather than filled with something
+       that is not the VIX. */
+    var wanted = rest.filter(function (s) { return !/[\^]/.test(s); })
+                     .slice(0, FINNHUB_MAX);
+    jobs.push(Promise.all(wanted.map(function (s) {
+      return finnhubQuote(s, src.key).then(function (q) { return [s, q]; });
+    })));
   }
 
-  return Promise.all(chunks.map(function (part) {
-    var ctrl = new AbortController();
-    var timer = setTimeout(function () { ctrl.abort(); }, 9000);
-    return fetch(api + '/q?s=' + encodeURIComponent(part.join(',')),
-                 { signal: ctrl.signal })
-      .then(function (r) {
-        clearTimeout(timer);
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function (d) { return (d && d.quotes) || {}; })
-      .catch(function () { clearTimeout(timer); return {}; });
-  })).then(function (parts) {
+  return Promise.all(jobs).then(function (groups) {
     var out = {};
-    parts.forEach(function (o) {
-      Object.keys(o).forEach(function (k) { out[k] = o[k]; });
+    groups.forEach(function (pairs) {
+      pairs.forEach(function (kv) { if (kv[1]) out[kv[0]] = kv[1]; });
     });
     return out;
   });
@@ -286,10 +379,10 @@ function toQuote(q) {
 }
 
 /* One symbol, for the analysis sheet. Falls back to the old proxy chain when
-   no worker is configured, so a device that has not been set up still shows
+   nothing is configured, so a device that has not been set up still shows
    whatever the proxies can manage. */
 function liveQuote(sym) {
-  if (!quoteApi()) return yahooQuote(sym);
+  if (!hasQuoteSource()) return yahooQuote(sym);
   return quoteMany([sym]).then(function (all) {
     var q = toQuote(all[sym]);
     if (q) return q;
@@ -1416,7 +1509,7 @@ function freshenWatched(force) {
   });
   renderAlerts(); paintTrades();
 
-  if (quoteApi()) {
+  if (hasQuoteSource()) {
     quoteMany(stale).then(function (all) {
       var got = false;
       stale.forEach(function (sym) {
@@ -2801,38 +2894,44 @@ function loadTickers(force) {
 
   var all = TICKERS.concat(TICKERS_MINI);
 
-  /* With a worker configured, every tile is live and current - including VIX
-     and the shekel, which have no ETF and no server-side source, and which
-     the repo file therefore cannot carry at all. */
-  if (quoteApi()) {
-    quoteMany(all.map(function (t) { return t[0]; })).then(function (got) {
-      var landed = 0;
-      all.forEach(function (t) {
-        var q = toQuote(got[t[0]]);
-        if (!q) return;
-        landed++;
-        paintTicker(t, q);
-        TK_CACHE[t[0]] = { p: q.price, c: q.chgPct, t: Date.now() };
-        if (t === all[0] && q.state) MKT_STATE = q.state;
-      });
-      if (landed) {
-        try { store.set(LS.tk, TK_CACHE); } catch (e) {}
-        markFresh();
-      } else {
-        // The worker answered with nothing at all: try again shortly rather
-        // than leaving the file's older numbers up for the full minute.
-        TICKERS_AT = 0;
-        setTimeout(function () { loadTickers(false); }, 15000);
+  /* Live quotes for the whole row in one go. This runs even with nothing
+     configured, because USD/ILS has a keyless source of its own - so the
+     shekel tile works on a fresh install, before any setup at all. */
+  quoteMany(all.map(function (t) { return t[0]; })).then(function (got) {
+    var landed = 0;
+    all.forEach(function (t) {
+      var q = toQuote(got[t[0]]);
+      if (!q) {
+        /* Nothing came back for this one. paintTicker keeps whatever number
+           is already on the tile, so this only ever writes the dash - onto a
+           tile that has never had a number at all, which would otherwise sit
+           on its loading skeleton forever. */
+        paintTicker(t, null);
+        return;
       }
+      landed++;
+      paintTicker(t, q);
+      TK_CACHE[t[0]] = { p: q.price, c: q.chgPct, t: Date.now() };
+      if (t === all[0] && q.state) MKT_STATE = q.state;
     });
-    paintMktState();
-    return;
-  }
+    if (landed) {
+      try { store.set(LS.tk, TK_CACHE); } catch (e) {}
+      markFresh();
+    } else if (hasQuoteSource()) {
+      // Configured and yet nothing came back: try again shortly rather than
+      // leaving the file's older numbers up for the full minute.
+      TICKERS_AT = 0;
+      setTimeout(function () { loadTickers(false); }, 15000);
+    }
+  });
 
-  /* No worker yet. Only the tiles with no server-side source - VIX and
-     USD/ILS - go out through the proxy chain, spread apart so a proxy that
-     does answer is not rate-limited by our own burst. */
-  var live = all.filter(function (t) { return t[3] === 'yahoo'; });
+  if (hasQuoteSource()) { paintMktState(); return; }
+
+  /* Nothing configured. The tiles with no server-side source go out through
+     the proxy chain as a last resort, spread apart so a proxy that does
+     answer is not rate-limited by our own burst. USD/ILS is skipped: it was
+     already handled above, without a proxy and without a key. */
+  var live = all.filter(function (t) { return t[3] === 'yahoo' && !FOREX_SYMS[t[0]]; });
   var ok = 0, done = 0;
   live.forEach(function (t, i) {
     setTimeout(function () {
@@ -3626,17 +3725,27 @@ function clearGhToken() {
 
 /* Where live prices come from.
  *
- * Yahoo and Nasdaq both refuse browsers a CORS header and the public proxies
- * that used to bridge that have failed, so without a worker of our own the
- * app can only show what the nightly runner committed - as fresh as the last
- * time GitHub's scheduler bothered to fire. Setting this makes prices live. */
+ * Yahoo and Nasdaq refuse browsers a CORS header and the public proxies that
+ * used to bridge that have failed, so without a source of its own the app can
+ * only show what the runner committed - as fresh as the last time GitHub's
+ * scheduler bothered to fire.
+ *
+ * One field takes either answer, told apart by shape rather than by making
+ * the person declare which kind of string they just pasted:
+ *
+ *   a Finnhub key   - one signup, sixty calls a minute, covers every stock
+ *                     and ETF. The short path.
+ *   a Worker URL    - worker/quotes.js. More setup; also carries indices and
+ *                     runs the alert schedule. */
 function renderQuoteApi() {
   var cur = store.get(LS.api, '') || '';
+  var src = quoteSource();
+  var label = src.kind === 'worker' ? 'Worker'
+            : src.kind === 'finnhub' ? 'מפתח Finnhub' : 'לא מוגדר';
   return '<div class="card">' +
-    '<div class="card-h"><span>שרת מחירים</span>' +
-      '<span class="sub" id="apiState">' +
-        (cur ? 'מוגדר' : 'לא מוגדר') + '</span></div>' +
-    '<input id="apiUrl" placeholder="https://xxx.workers.dev" ' +
+    '<div class="card-h"><span>מקור מחירים</span>' +
+      '<span class="sub" id="apiState">' + label + '</span></div>' +
+    '<input id="apiUrl" placeholder="מפתח Finnhub, או כתובת Worker" ' +
       'autocomplete="off" autocapitalize="off" spellcheck="false" ' +
       'value="' + esc(cur) + '">' +
     '<div class="frow" style="margin-top:9px">' +
@@ -3645,49 +3754,67 @@ function renderQuoteApi() {
         'onclick="clearQuoteApi()">נתק</button>' : '') +
     '</div>' +
     '<div class="score-note" id="apiNote" style="margin-top:9px">' +
-      (cur ? 'המחירים נמשכים חיים דרך הכתובת הזו.'
-           : 'בלי זה המחירים מגיעים מהסריקה בשרת, שמתעדכנת רק כשהתזמון ' +
-             'של GitHub רץ. פריסה: docs/quotes.md') +
+      (cur ? 'המחירים נמשכים חיים דרך המקור הזה.'
+           : 'הדרך הקצרה: הרשמה ב־finnhub.io, להעתיק את המפתח ולהדביק כאן. ' +
+             'בלי זה המחירים מגיעים מהסריקה בשרת, שמתעדכנת רק כשהתזמון של ' +
+             'GitHub רץ.') +
     '</div>' +
     '</div>';
 }
 
+/* Saved only after it has produced a real SPY price. A source that does not
+   actually answer is worse than none, because it would silently displace a
+   fallback that works - so the check is the price on screen, not the format
+   of the string. */
 function saveQuoteApi() {
   var el = $('#apiUrl');
   var note = $('#apiNote');
-  var url = String((el && el.value) || '').trim().replace(/\/+$/, '');
+  var val = String((el && el.value) || '').trim().replace(/\/+$/, '');
   var say = function (msg, good) {
     if (!note) return;
     note.textContent = msg;
     note.style.color = good ? 'var(--primary-500)' : 'var(--alert)';
   };
 
-  if (!url) { say('הדבק את הכתובת שקיבלת מ־Cloudflare.', false); return; }
-  if (!/^https:\/\//.test(url)) { say('הכתובת חייבת להתחיל ב־https://', false); return; }
+  if (!val) { say('הדבק מפתח Finnhub או כתובת Worker.', false); return; }
+  var worker = /^https?:\/\//i.test(val);
+  if (worker && !/^https:\/\//i.test(val)) {
+    say('כתובת Worker חייבת להתחיל ב־https://', false); return;
+  }
 
   say('בודק…', true);
-  // Proved against a real symbol rather than just saved: a URL that does not
-  // actually answer is worse than none, because it would silently replace a
-  // working fallback.
-  fetch(url + '/q?s=SPY', { cache: 'no-store' })
-    .then(function (r) {
-      if (!r.ok) throw new Error('HTTP ' + r.status);
-      return r.json();
-    })
-    .then(function (d) {
-      var q = d && d.quotes && d.quotes.SPY;
-      if (!q || q.p == null) throw new Error('לא הוחזר מחיר');
-      store.set(LS.api, url);
-      say('עובד — SPY ' + money(q.p) + '. המחירים חיים מעכשיו.', true);
-      var st = $('#apiState'); if (st) st.textContent = 'מוגדר';
-      TICKERS_AT = 0; FILE_AT = 0;
-      loadTickers(true);
-      checkAlerts(true);
-      haptic(12);
-    })
-    .catch(function (e) {
-      say('לא הצלחתי להגיע לכתובת: ' + e.message + '. לא נשמר.', false);
-    });
+  var probe = worker
+    ? fetch(val + '/q?s=SPY', { cache: 'no-store' })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.json();
+        })
+        .then(function (d) {
+          var q = d && d.quotes && d.quotes.SPY;
+          if (!q || q.p == null) throw new Error('לא הוחזר מחיר');
+          return q.p;
+        })
+    : getJson('https://finnhub.io/api/v1/quote?symbol=SPY&token=' +
+              encodeURIComponent(val), 9000)
+        .then(function (d) {
+          if (d && d.error) throw new Error(d.error);
+          if (!d || !d.c) throw new Error('המפתח לא החזיר מחיר');
+          return d.c;
+        });
+
+  probe.then(function (price) {
+    store.set(LS.api, val);
+    say('עובד — SPY ' + money(price) + '. המחירים חיים מעכשיו.', true);
+    var st = $('#apiState');
+    if (st) st.textContent = worker ? 'Worker' : 'מפתח Finnhub';
+    TICKERS_AT = 0; FILE_AT = 0;
+    loadTickers(true);
+    checkAlerts(true);
+    haptic(12);
+  }).catch(function (e) {
+    say((worker ? 'לא הצלחתי להגיע לכתובת: ' : 'המפתח לא עבד: ') +
+        e.message + '. לא נשמר.', false);
+  });
 }
 
 function clearQuoteApi() {
