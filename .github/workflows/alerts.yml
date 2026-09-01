@@ -1,8 +1,19 @@
-name: Check price alerts
+name: Refresh prices (alerts on demand)
 
-# The app can only check alerts while it is open, because the alerts live in
-# localStorage on the phone. This runs the same checks on a schedule against
-# data/alerts.json, which is what lets an alert arrive when the app is closed.
+# Alerts moved to the Cloudflare Worker (worker/quotes.js). Its cron actually
+# fires; GitHub's went quiet for three days straight with this workflow
+# reporting healthy, and afterwards settled at roughly one tick every four
+# hours instead of four an hour.
+#
+# What is left here on a schedule is data/tickers.json - the fallback the app
+# reads when no quote server is configured, or when one is down. That file may
+# lag without anyone being hurt, which is exactly the kind of job an unreliable
+# scheduler can still hold.
+#
+# The alert check itself now runs ONLY on a manual dispatch, so it stays
+# available for --probe and for testing without ever racing the Worker. Two
+# schedulers with two separate memories of what already fired would send
+# everything twice.
 #
 # Times are UTC. US market hours are 13:30-20:00 UTC in summer and
 # 14:30-21:00 in winter, so the window below covers both without having to be
@@ -68,8 +79,11 @@ jobs:
         continue-on-error: true
         run: python scripts/build_tickers.py
 
+      # Manual only: on a schedule this would duplicate every notification the
+      # Worker already sent, since the two keep separate state.
       - name: Check alerts
         id: check
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           # An undefined repository variable arrives as an empty string rather
@@ -81,7 +95,7 @@ jobs:
             ${{ inputs.probe && format('--probe {0}', inputs.probe) || '' }} \
             ${{ inputs.dry_run && '--dry-run' || '' }}
 
-      - name: Commit fired state
+      - name: Commit prices and fired state
         if: ${{ !inputs.dry_run }}
         run: |
           git config user.name  'github-actions[bot]'
