@@ -17,9 +17,16 @@ name: Check price alerts
 # Times are UTC. US market hours are 13:30-20:00 UTC in summer and
 # 14:30-21:00 in winter, so the window below covers both without having to be
 # edited twice a year.
+#
+# Minutes are offset from the hour (3/18/33/48, not 0/15/30/45) on GitHub's
+# own advice: the top of the hour and other round 15-minute marks are their
+# busiest moments for scheduled-workflow load, and that is when a tick is
+# most likely to be delayed or dropped. This does not fix the underlying
+# best-effort nature of `schedule` - GitHub can still silently skip a run -
+# it only avoids the specific times most likely to trigger it.
 on:
   schedule:
-    - cron: '*/15 13-21 * * 1-5'
+    - cron: '3,18,33,48 13-21 * * 1-5'
   # GitHub's own scheduler can silently stop delivering cron ticks for days
   # with no error anywhere - it happened here for three days straight,
   # through a full trading day, with the workflow itself reporting healthy
