@@ -55,7 +55,12 @@ var LS = {
   folds: 'sa_folds',
   /* Last known index/mini-ticker quotes, so a reload during a proxy outage
      paints real numbers instead of a bare skeleton. */
-  tk: 'sa_tk'
+  tk: 'sa_tk',
+  /* The quote endpoint from worker/quotes.js, once it has been deployed.
+     Kept as a setting rather than baked in so the URL is the deployer's, and
+     so the app still runs - on the repo file plus whatever the public
+     proxies manage - before one exists. */
+  api: 'sa_api'
 };
 
 var store = {
@@ -212,6 +217,83 @@ function yahooQuote(sym) {
       state: m.marketState || '',
       name: m.longName || m.shortName || ''
     };
+  });
+}
+
+/* ---------------------------------------------------------- quote client */
+/* One place every live price in the app comes from.
+ *
+ * Yahoo and Nasdaq both refuse to send a CORS header, so a browser can never
+ * read either of them directly, and the public proxies that used to bridge
+ * that failed together. worker/quotes.js is our own hop: it does the fetching
+ * server-side, where CORS does not apply, and answers with a header that lets
+ * the page read it. Symbols go up, prices come back, and nothing in between
+ * belongs to anybody else.
+ *
+ * Until one is deployed this returns nothing and every caller falls back to
+ * the repo file, so the app degrades to where it was rather than breaking. */
+function quoteApi() {
+  var u = String(store.get(LS.api, '') || '').trim().replace(/\/+$/, '');
+  return /^https:\/\//.test(u) ? u : '';
+}
+
+var QUOTE_BATCH = 25;        // matches MAX_SYMBOLS in the worker
+
+/* Asks for many symbols at once: the home screen's seven, or a whole
+   watchlist, cost one request rather than one each. */
+function quoteMany(syms) {
+  var api = quoteApi();
+  var list = (syms || []).filter(Boolean);
+  if (!api || !list.length) return Promise.resolve({});
+
+  var chunks = [];
+  for (var i = 0; i < list.length; i += QUOTE_BATCH) {
+    chunks.push(list.slice(i, i + QUOTE_BATCH));
+  }
+
+  return Promise.all(chunks.map(function (part) {
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, 9000);
+    return fetch(api + '/q?s=' + encodeURIComponent(part.join(',')),
+                 { signal: ctrl.signal })
+      .then(function (r) {
+        clearTimeout(timer);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (d) { return (d && d.quotes) || {}; })
+      .catch(function () { clearTimeout(timer); return {}; });
+  })).then(function (parts) {
+    var out = {};
+    parts.forEach(function (o) {
+      Object.keys(o).forEach(function (k) { out[k] = o[k]; });
+    });
+    return out;
+  });
+}
+
+/* The shape the rest of the app already expects from a quote. */
+function toQuote(q) {
+  if (!q || q.p == null) return null;
+  return {
+    price: q.p,
+    chgPct: q.c == null ? null : q.c,
+    prev: null,
+    cur: 'USD',
+    state: q.st || '',
+    name: q.n || ''
+  };
+}
+
+/* One symbol, for the analysis sheet. Falls back to the old proxy chain when
+   no worker is configured, so a device that has not been set up still shows
+   whatever the proxies can manage. */
+function liveQuote(sym) {
+  if (!quoteApi()) return yahooQuote(sym);
+  return quoteMany([sym]).then(function (all) {
+    var q = toQuote(all[sym]);
+    if (q) return q;
+    throw new Error('אין נתונים');
   });
 }
 
@@ -715,7 +797,7 @@ function analyze(sym) {
   var row = SNAP_BY_SYM[sym] || null;
   renderAnalysis(sym, row, null, null);
 
-  yahooQuote(sym).then(function (q) {
+  liveQuote(sym).then(function (q) {
     if (CUR === sym) renderAnalysis(sym, row, q, undefined);
   }).catch(function () {});
 
@@ -1314,19 +1396,43 @@ function checkAlerts(force) {
     .catch(function () { freshenWatched(force); });
 }
 
-/* Whatever the file could not supply, asked for the old way. */
+/* Live prices for everything on a list, in one request when a worker is
+   configured. The repo file has already painted something by now; this is
+   what makes it current rather than up to fifteen minutes old. */
 function freshenWatched(force) {
   var now = Date.now();
-  watchedSymbols().forEach(function (sym) {
+  var stale = watchedSymbols().filter(function (sym) {
     var fresh = PRICE_AT[sym] && (now - PRICE_AT[sym]) < PRICE_TTL;
-    if (!force && ALERT_PRICES[sym] != null && fresh) return;
+    return force || ALERT_PRICES[sym] == null || !fresh;
+  });
+  if (!stale.length) return;
 
+  // Something to look at while the request is out.
+  stale.forEach(function (sym) {
     var snap = SNAP_BY_SYM[sym];
     if (snap && snap.t && snap.t.price != null && ALERT_PRICES[sym] == null) {
-      ALERT_PRICES[sym] = snap.t.price;   // shown until a real one lands
-      renderAlerts();
-      paintTrades();
+      ALERT_PRICES[sym] = snap.t.price;
     }
+  });
+  renderAlerts(); paintTrades();
+
+  if (quoteApi()) {
+    quoteMany(stale).then(function (all) {
+      var got = false;
+      stale.forEach(function (sym) {
+        var q = toQuote(all[sym]);
+        if (!q) return;
+        ALERT_PRICES[sym] = q.price;
+        PRICE_AT[sym] = Date.now();
+        got = true;
+      });
+      if (got) { renderAlerts(); paintTrades(); renderWatchlist(); }
+    });
+    return;
+  }
+
+  // No worker yet: the old one-at-a-time path through the public proxies.
+  stale.forEach(function (sym) {
     yahooQuote(sym).then(function (q) {
       if (q && q.price != null) {
         ALERT_PRICES[sym] = q.price;
@@ -2689,17 +2795,44 @@ function loadTickers(force) {
   if (!force && TICKERS_AT && now - TICKERS_AT < TICKERS_TTL) return;
   TICKERS_AT = now;                          // claim the slot before awaiting
 
-  /* One request covers every file-backed tile, so the whole S&P/Nasdaq/
-     bitcoin/gold/oil row costs a single same-origin GET that cannot be
-     blocked by CORS or refused by somebody else's proxy. */
+  /* The repo file first: one same-origin GET that nothing can block, so the
+     row has real numbers on it before any live request is even sent. */
   loadTickerFile(true);   // loadTickers has already applied its own TTL
 
-  /* Only the tiles with no server-side source left - VIX and USD/ILS - still
-     go out through the proxy chain, spread apart so a proxy that does answer
-     is not rate-limited by our own burst. */
-  var live = TICKERS.concat(TICKERS_MINI).filter(function (t) {
-    return t[3] === 'yahoo';
-  });
+  var all = TICKERS.concat(TICKERS_MINI);
+
+  /* With a worker configured, every tile is live and current - including VIX
+     and the shekel, which have no ETF and no server-side source, and which
+     the repo file therefore cannot carry at all. */
+  if (quoteApi()) {
+    quoteMany(all.map(function (t) { return t[0]; })).then(function (got) {
+      var landed = 0;
+      all.forEach(function (t) {
+        var q = toQuote(got[t[0]]);
+        if (!q) return;
+        landed++;
+        paintTicker(t, q);
+        TK_CACHE[t[0]] = { p: q.price, c: q.chgPct, t: Date.now() };
+        if (t === all[0] && q.state) MKT_STATE = q.state;
+      });
+      if (landed) {
+        try { store.set(LS.tk, TK_CACHE); } catch (e) {}
+        markFresh();
+      } else {
+        // The worker answered with nothing at all: try again shortly rather
+        // than leaving the file's older numbers up for the full minute.
+        TICKERS_AT = 0;
+        setTimeout(function () { loadTickers(false); }, 15000);
+      }
+    });
+    paintMktState();
+    return;
+  }
+
+  /* No worker yet. Only the tiles with no server-side source - VIX and
+     USD/ILS - go out through the proxy chain, spread apart so a proxy that
+     does answer is not rate-limited by our own burst. */
+  var live = all.filter(function (t) { return t[3] === 'yahoo'; });
   var ok = 0, done = 0;
   live.forEach(function (t, i) {
     setTimeout(function () {
@@ -2778,6 +2911,12 @@ function loadTickerFileNow() {
         if (t[3] !== 'file') return;
         var q = quotes[t[0]];
         if (!q || q.p == null) { paintTicker(t, null); return; }
+        /* Never paint over something newer. The file is rebuilt every
+           fifteen minutes at best and the two requests race, so without this
+           a live quote from a second ago gets replaced by a file quote from
+           forty minutes ago purely because it finished second. */
+        var have = TK_CACHE[t[0]];
+        if (have && have.t > at) return;
         paintTicker(t, { price: q.p, chgPct: q.c });
         TK_CACHE[t[0]] = { p: q.p, c: q.c, t: at };
       });
@@ -3147,6 +3286,7 @@ function openSettings() {
       '<div class="score-note" style="margin-top:10px">המאגר נבנה כל לילה ' +
         'מדוחות שהוגשו ל־SEC. המחירים החיים נמשכים מהמכשיר.</div>' +
     '</div>' +
+    renderQuoteApi() +
     renderAlertsSync() +
     '<div class="card">' +
       '<div class="card-h"><span>פעולות</span></div>' +
@@ -3481,6 +3621,77 @@ function saveGhToken() {
 function clearGhToken() {
   store.set(LS.gh, '');
   SYNC = { state: 'none' };
+  openSettings();
+}
+
+/* Where live prices come from.
+ *
+ * Yahoo and Nasdaq both refuse browsers a CORS header and the public proxies
+ * that used to bridge that have failed, so without a worker of our own the
+ * app can only show what the nightly runner committed - as fresh as the last
+ * time GitHub's scheduler bothered to fire. Setting this makes prices live. */
+function renderQuoteApi() {
+  var cur = store.get(LS.api, '') || '';
+  return '<div class="card">' +
+    '<div class="card-h"><span>שרת מחירים</span>' +
+      '<span class="sub" id="apiState">' +
+        (cur ? 'מוגדר' : 'לא מוגדר') + '</span></div>' +
+    '<input id="apiUrl" placeholder="https://xxx.workers.dev" ' +
+      'autocomplete="off" autocapitalize="off" spellcheck="false" ' +
+      'value="' + esc(cur) + '">' +
+    '<div class="frow" style="margin-top:9px">' +
+      '<button class="btn" onclick="saveQuoteApi()">שמור ובדוק</button>' +
+      (cur ? '<button class="btn ghost" style="max-width:96px" ' +
+        'onclick="clearQuoteApi()">נתק</button>' : '') +
+    '</div>' +
+    '<div class="score-note" id="apiNote" style="margin-top:9px">' +
+      (cur ? 'המחירים נמשכים חיים דרך הכתובת הזו.'
+           : 'בלי זה המחירים מגיעים מהסריקה בשרת, שמתעדכנת רק כשהתזמון ' +
+             'של GitHub רץ. פריסה: docs/quotes.md') +
+    '</div>' +
+    '</div>';
+}
+
+function saveQuoteApi() {
+  var el = $('#apiUrl');
+  var note = $('#apiNote');
+  var url = String((el && el.value) || '').trim().replace(/\/+$/, '');
+  var say = function (msg, good) {
+    if (!note) return;
+    note.textContent = msg;
+    note.style.color = good ? 'var(--primary-500)' : 'var(--alert)';
+  };
+
+  if (!url) { say('הדבק את הכתובת שקיבלת מ־Cloudflare.', false); return; }
+  if (!/^https:\/\//.test(url)) { say('הכתובת חייבת להתחיל ב־https://', false); return; }
+
+  say('בודק…', true);
+  // Proved against a real symbol rather than just saved: a URL that does not
+  // actually answer is worse than none, because it would silently replace a
+  // working fallback.
+  fetch(url + '/q?s=SPY', { cache: 'no-store' })
+    .then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function (d) {
+      var q = d && d.quotes && d.quotes.SPY;
+      if (!q || q.p == null) throw new Error('לא הוחזר מחיר');
+      store.set(LS.api, url);
+      say('עובד — SPY ' + money(q.p) + '. המחירים חיים מעכשיו.', true);
+      var st = $('#apiState'); if (st) st.textContent = 'מוגדר';
+      TICKERS_AT = 0; FILE_AT = 0;
+      loadTickers(true);
+      checkAlerts(true);
+      haptic(12);
+    })
+    .catch(function (e) {
+      say('לא הצלחתי להגיע לכתובת: ' + e.message + '. לא נשמר.', false);
+    });
+}
+
+function clearQuoteApi() {
+  store.set(LS.api, '');
   openSettings();
 }
 
