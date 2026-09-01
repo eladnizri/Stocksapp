@@ -1,17 +1,16 @@
-name: Refresh prices (alerts on demand)
+name: Check price alerts
 
-# Alerts moved to the Cloudflare Worker (worker/quotes.js). Its cron actually
-# fires; GitHub's went quiet for three days straight with this workflow
-# reporting healthy, and afterwards settled at roughly one tick every four
-# hours instead of four an hour.
+# This is the alert checker, and it stays in charge until something else is
+# proven to be. worker/quotes.js can run the same checks on Cloudflare's
+# scheduler, which fires far more reliably than this one - but a migration
+# that is not finished must never leave the alerts switched off in between.
 #
-# What is left here on a schedule is data/tickers.json - the fallback the app
-# reads when no quote server is configured, or when one is down. That file may
-# lag without anyone being hurt, which is exactly the kind of job an unreliable
-# scheduler can still hold.
+# Which one sends is decided by a repository variable, not by code:
 #
-# The alert check itself now runs ONLY on a manual dispatch, so it stays
-# available for --probe and for testing without ever racing the Worker. Two
+#   ALERTS_OWNER unset or 'github'  -> this workflow sends.  (default)
+#   ALERTS_OWNER = 'cloudflare'     -> this workflow refreshes prices only.
+#
+# Set it only once the Worker has actually delivered a notification. Two
 # schedulers with two separate memories of what already fired would send
 # everything twice.
 #
@@ -79,11 +78,12 @@ jobs:
         continue-on-error: true
         run: python scripts/build_tickers.py
 
-      # Manual only: on a schedule this would duplicate every notification the
-      # Worker already sent, since the two keep separate state.
+      # Skipped only once ALERTS_OWNER says Cloudflare is doing this instead.
+      # A manual run always checks, so the workflow stays usable for --probe
+      # and for testing after the handover.
       - name: Check alerts
         id: check
-        if: ${{ github.event_name == 'workflow_dispatch' }}
+        if: ${{ vars.ALERTS_OWNER != 'cloudflare' || github.event_name == 'workflow_dispatch' }}
         env:
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           # An undefined repository variable arrives as an empty string rather
