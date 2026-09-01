@@ -14,16 +14,30 @@ name: Check price alerts
 # schedulers with two separate memories of what already fired would send
 # everything twice.
 #
+# HOW THIS ACTUALLY GETS RUN
+#
+# The real trigger is external: cron-job.org POSTs to this workflow's
+# dispatch endpoint every fifteen minutes. See docs/scheduling.md.
+#
+# That is not belt-and-braces, it is the fix. `on: schedule` is best-effort
+# by GitHub's own documentation and has twice gone silent here for many
+# hours - not a failed run, no run at all, so nothing reports unhealthy and
+# there is nothing to retry. A dispatch call either returns 204 or returns
+# an error that shows up in the caller's log, which is the whole point.
+#
+# The schedule below stays enabled anyway, as free redundancy. A duplicate
+# run is harmless: `concurrency` stops two from overlapping, alert_state.json
+# stops a notification going out twice, and this repo is public so Actions
+# minutes are unlimited.
+#
 # Times are UTC. US market hours are 13:30-20:00 UTC in summer and
 # 14:30-21:00 in winter, so the window below covers both without having to be
 # edited twice a year.
 #
 # Minutes are offset from the hour (3/18/33/48, not 0/15/30/45) on GitHub's
-# own advice: the top of the hour and other round 15-minute marks are their
-# busiest moments for scheduled-workflow load, and that is when a tick is
-# most likely to be delayed or dropped. This does not fix the underlying
-# best-effort nature of `schedule` - GitHub can still silently skip a run -
-# it only avoids the specific times most likely to trigger it.
+# own advice - the round marks are their busiest. Tried on its own first, and
+# measured: three consecutive ticks still failed to fire. Kept because it
+# costs nothing, but it was not enough, which is what led to the above.
 on:
   schedule:
     - cron: '3,18,33,48 13-21 * * 1-5'
