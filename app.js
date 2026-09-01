@@ -287,16 +287,40 @@ function getJson(url, ms) {
    app that needs no setup whatsoever - so this tile works on a fresh install
    before anything has been configured. It quotes one rate a day rather than
    tick by tick, which for a shekel reference is all anyone reads it for. */
+/* Three keyless providers, tried in order rather than raced: this tile is
+   cosmetic (a reference rate, not something anyone trades on), so there is no
+   reason to spend three requests when the first one usually answers. Only
+   one provider being blocked on a given network - which is what happened
+   here, Frankfurter alone came back empty for one user while it answered
+   every probe run from GitHub - should not leave the tile permanently dark. */
+var FOREX_PROVIDERS = [
+  function (a, b) {
+    return getJson('https://api.frankfurter.app/latest?from=' + a + '&to=' + b, 6000)
+      .then(function (d) { return d && d.rates && d.rates[b]; });
+  },
+  function (a, b) {
+    return getJson('https://open.er-api.com/v6/latest/' + a, 6000)
+      .then(function (d) { return d && d.rates && d.rates[b]; });
+  },
+  function (a, b) {
+    return getJson('https://api.exchangerate-api.com/v4/latest/' + a, 6000)
+      .then(function (d) { return d && d.rates && d.rates[b]; });
+  }
+];
+
 function forexQuote(sym) {
   var pair = FOREX_SYMS[sym];
   if (!pair) return Promise.resolve(null);
-  return getJson('https://api.frankfurter.app/latest?from=' + pair[0] +
-                 '&to=' + pair[1], 7000)
-    .then(function (d) {
-      var v = d && d.rates && d.rates[pair[1]];
-      return v == null ? null : { p: v, c: null, n: pair[0] + '/' + pair[1] };
-    })
-    .catch(function () { return null; });
+  var chain = Promise.resolve(null);
+  FOREX_PROVIDERS.forEach(function (get) {
+    chain = chain.then(function (v) {
+      if (v != null) return v;
+      return get(pair[0], pair[1]).catch(function () { return null; });
+    });
+  });
+  return chain.then(function (v) {
+    return v == null ? null : { p: v, c: null, n: pair[0] + '/' + pair[1] };
+  });
 }
 
 /* One symbol from Finnhub. c is the last price and dp the day's percent; a
