@@ -8,6 +8,7 @@ on:
     branches: ['claude/**']
     paths:
       - 'scripts/probe_sources.py'
+      - 'scripts/probe_browser_apis.py'
       - 'scripts/probe_sector.py'
       - 'scripts/probe_analyst.py'
       - '.github/workflows/probe.yml'
@@ -25,6 +26,12 @@ jobs:
         run: python scripts/probe_analyst.py
       - name: Probe the client's CORS proxies
         run: python scripts/probe_cors_proxies.py
+
+      # Is a Worker actually necessary, or is there an API the page can call
+      # on its own? Only a real Access-Control-Allow-Origin header answers it.
+      - name: Probe browser-readable quote APIs
+        if: always()
+        run: python scripts/probe_browser_apis.py
       - name: Probe server-side quote sources
         if: always()
         run: python scripts/probe_server_quotes.py
