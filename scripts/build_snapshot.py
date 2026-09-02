@@ -251,6 +251,94 @@ def build_universe(session):
 # ==========================================================================
 # SEC: ticker -> CIK
 # ==========================================================================
+# --------------------------------------------------------- wide universe
+# The index universe above is what a fundamental screen wants: 500 large caps
+# with SEC filings behind every number. A technical screen wants the opposite -
+# as many liquid tickers as possible, because a moving-average cross is just as
+# real on a $2B name as on Apple, and half the interesting ones are in neither
+# index. SOFI and IREN both sat in the user's own alert list and neither could
+# ever appear in the scanner.
+#
+# Nasdaq's screener endpoint returns the whole market - 7,128 rows, 2MB, one
+# request - with a market cap and a sector per row. Measured, not assumed:
+# scripts/probe_universe.py. That makes the wide list free; what is not free is
+# the daily history behind each symbol, which is one request each. So the cap
+# cutoff is really a runtime dial, and it is exposed as one.
+WIDE_MIN_CAP = 500_000_000
+
+# Blank-check shells have no chart worth screening and there are hundreds of
+# them. Their industry label is reliable enough to drop them on.
+SKIP_INDUSTRIES = {"blank checks"}
+
+
+def fetch_wide_universe(session, min_cap=WIDE_MIN_CAP):
+    """{symbol: {"cap", "sector", "name"}} for every liquid-enough US ticker.
+
+    One request for the entire market. Returns {} on any failure - the scan
+    then simply proceeds with the index universe, which is the behaviour it
+    had before this existed.
+    """
+    log(f"[1b/8] Wide universe (cap >= ${min_cap/1e6:.0f}M)")
+    try:
+        r = session.get("https://api.nasdaq.com/api/screener/stocks"
+                        "?tableonly=true&limit=25000&download=true", timeout=90)
+        if r.status_code != 200:
+            log(f"    HTTP {r.status_code} - continuing without it")
+            return {}
+        rows = _find_rows(r.json()) or []
+    except Exception as e:
+        log(f"    unavailable ({type(e).__name__}) - continuing without it")
+        return {}
+
+    out, skipped = {}, 0
+    for row in rows:
+        sym = str(row.get("symbol", "")).strip().upper().replace(".", "-")
+        # Warrants, units and preferred lines share a root with the common
+        # stock and have no chart of their own worth screening.
+        if not sym or not re.fullmatch(r"[A-Z][A-Z0-9-]{0,6}", sym):
+            continue
+        if str(row.get("industry", "")).strip().lower() in SKIP_INDUSTRIES:
+            skipped += 1
+            continue
+        try:
+            cap = float(str(row.get("marketCap", "") or "").replace(",", ""))
+        except ValueError:
+            continue
+        if cap < min_cap:
+            continue
+        out[sym] = {
+            "cap": cap,
+            "sector": NASDAQ_SECTOR_HE.get(
+                str(row.get("sector", "")).strip().lower()),
+            "name": str(row.get("name", "")).strip(),
+        }
+    log(f"    {len(rows)} listed, {len(out)} above the cutoff "
+        f"({skipped} blank-check shells dropped)")
+    return out
+
+
+def _find_rows(node, depth=0):
+    """Nasdaq has moved the row list around inside this envelope before, so
+    search for it rather than hard-coding a path."""
+    if depth > 6:
+        return None
+    if isinstance(node, list):
+        if node and isinstance(node[0], dict) and "symbol" in node[0]:
+            return node
+        return None
+    if isinstance(node, dict):
+        for k in ("rows", "data", "records", "table"):
+            if k in node:
+                f = _find_rows(node[k], depth + 1)
+                if f:
+                    return f
+        for v in node.values():
+            f = _find_rows(v, depth + 1)
+            if f:
+                return f
+    return None
+
+
 def sec_cik_map(session):
     """Returns {ticker: (cik, company name)} - the same file carries both."""
     log("[2/8] SEC ticker -> CIK map")
@@ -932,6 +1020,36 @@ def atr(bars, n=14):
     return sum(trs) / len(trs) if trs else None
 
 
+def cross(closes, fast, slow, lookback=10):
+    """'golden', 'death' or None: did the fast average cross the slow one
+    within the last `lookback` sessions, and which way?
+
+    Reads the sign of (fast - slow) across the window and reports a change,
+    rather than just which is on top today. "Above" is a state and already
+    covered by the vma fields; a cross is an event, and the event is the part
+    that is only true for a few days.
+    """
+    if len(closes) < slow + lookback + 1:
+        return None
+    signs = []
+    for back in range(lookback, -1, -1):
+        upto = closes[:len(closes) - back] if back else closes
+        f, sl = sma(upto, fast), sma(upto, slow)
+        if f is None or sl is None:
+            return None
+        # A tie carries no direction. Collapsing it to one side would invent a
+        # transition on the next real move - on a series that sat flat and then
+        # fell, "equal" read as "below" and the fall looked like no change at
+        # all.
+        signs.append(0 if f == sl else (1 if f > sl else -1))
+    now = signs[-1]
+    if now == 0:
+        return None
+    if any(x != 0 and x != now for x in signs):
+        return "golden" if now > 0 else "death"
+    return None
+
+
 def ret_pct(closes, n):
     if len(closes) <= n or not closes[-1 - n]:
         return None
@@ -971,6 +1089,19 @@ def compute_technicals(bars):
             t["v" + k] = ((price / t[k]) - 1) * 100
     if t.get("atr") and price:
         t["atrPct"] = (t["atr"] / price) * 100
+
+    # Today's volume against its own 60-day average. 1.0 is an ordinary day;
+    # the interesting readings are the ones well above it, which is why this
+    # is a ratio rather than a raw share count - it is comparable across a
+    # $2B name and a $2T one.
+    last_vol = bars[-1].get("v")
+    if last_vol and t.get("avgVol"):
+        t["volRatio"] = last_vol / t["avgVol"]
+
+    for slow, key in ((150, "cross150"), (200, "cross200")):
+        c = cross(closes, 50, slow)
+        if c:
+            t[key] = c
     return {k: v for k, v in t.items() if v is not None}
 
 
@@ -1143,6 +1274,12 @@ def main():
     ap.add_argument("--limit", type=int, default=0,
                     help="only process the first N symbols (for smoke tests)")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--wide-min-cap", type=float, default=WIDE_MIN_CAP,
+                    help="market-cap floor for the technical-only universe; "
+                         "this is the runtime dial, since each extra symbol "
+                         "costs one history request")
+    ap.add_argument("--no-wide", action="store_true",
+                    help="index universe only, as before the wide scan existed")
     args = ap.parse_args()
 
     os.makedirs(DATA, exist_ok=True)
@@ -1154,26 +1291,52 @@ def main():
     web = web_session()
 
     members = build_universe(web)
-    symbols = sorted(members)
+    core = sorted(members)          # index members: the full fundamental scan
+
+    # Everything liquid enough to have a chart worth screening. These get
+    # price history and nothing else - no SEC filings, no analyst targets, no
+    # fundamentals - because the screener that reads them is technical, and
+    # fetching filings for three thousand extra companies would turn a twelve
+    # minute job into an hour-plus one for data nothing would display.
+    wide = {} if args.no_wide else fetch_wide_universe(web, args.wide_min_cap)
+    symbols = sorted(set(core) | set(wide))
+
     if args.limit:
-        symbols = symbols[:args.limit]
+        # Keep the smoke test on index members, which exercise every phase.
+        core = core[:args.limit]
+        symbols = sorted(set(core) | set(list(wide)[:args.limit]))
         log(f"    limited to {len(symbols)} symbols")
+    core_set = set(core)
+    log(f"    {len(core)} with fundamentals, "
+        f"{len(symbols) - len(core)} technical-only, {len(symbols)} total")
 
     cik_map = sec_cik_map(sec)
-    sym_cik = {s: cik_map[s][0] for s in symbols if s in cik_map}
-    sym_name = {s: cik_map[s][1] for s in symbols if s in cik_map}
-    log(f"    {len(sym_cik)}/{len(symbols)} symbols resolved to a CIK")
+    sym_cik = {s: cik_map[s][0] for s in core if s in cik_map}
+    sym_name = {s: cik_map[s][1] for s in core if s in cik_map}
+    log(f"    {len(sym_cik)}/{len(core)} index symbols resolved to a CIK")
 
-    sectors = fetch_sectors(web, sec, symbols, sym_cik)
+    sectors = fetch_sectors(web, sec, core, sym_cik)
+    # The wide list already carries a sector per row, free, from the same
+    # response the symbols came from - no second lookup for them.
+    for sym, meta in wide.items():
+        if sym not in sectors and meta.get("sector"):
+            sectors[sym] = meta["sector"]
 
-    analyst = fetch_analyst(symbols, workers=args.workers)
+    analyst = fetch_analyst(core, workers=args.workers)
     earnings = fetch_earnings_dates(web)
 
     facts = collect_fundamentals(sec, set(sym_cik.values()))
 
-    log("[7/8] Prices and technicals")
+    log(f"[7/8] Prices and technicals for {len(symbols)} symbols")
     hist = {}
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
+    # The wide universe multiplies this phase by roughly six, and it is one
+    # request per symbol with no bulk alternative. More workers than the SEC
+    # phases use, because Nasdaq has taken six concurrently for months without
+    # complaint, but still bounded - a throttled request returns nothing and
+    # the symbol quietly loses its technicals, which is exactly the kind of
+    # silent degradation the warning below exists to surface.
+    hist_workers = max(args.workers, 10 if len(symbols) > 1000 else args.workers)
+    with ThreadPoolExecutor(max_workers=hist_workers) as ex:
         futs = {ex.submit(fetch_history, web_session(), s): s for s in symbols}
         done = 0
         for fut in as_completed(futs):
@@ -1185,9 +1348,13 @@ def main():
             if bars:
                 hist[sym] = bars
             done += 1
-            if done % 50 == 0:
+            if done % 250 == 0:
                 log(f"    ...{done}/{len(symbols)} fetched, {len(hist)} with data")
     log(f"    {len(hist)}/{len(symbols)} symbols have price history")
+    if symbols and len(hist) < len(symbols) * 0.8:
+        log(f"    WARNING: only {len(hist)/len(symbols)*100:.0f}% returned "
+            f"history - Nasdaq is likely throttling, and the screener is "
+            f"missing symbols rather than reporting an error")
 
     log("[8/8] Assemble")
     rows = []
@@ -1202,8 +1369,15 @@ def main():
         if not t and not f:
             continue
 
-        r = {"s": sym, "n": sym_name.get(sym, ""),
-             "i": sorted(members.get(sym, []))}
+        # "wide" is a membership label like sp500 and ndx, so the app's
+        # existing index chips can include or exclude the technical-only
+        # names without a second mechanism. A row with no label at all would
+        # be filtered out by every chip and silently never appear.
+        tags = sorted(members.get(sym, []))
+        if not tags:
+            tags = ["wide"]
+        r = {"s": sym, "n": sym_name.get(sym, "") or wide.get(sym, {}).get("name", ""),
+             "i": tags}
         if sectors.get(sym):
             r["sec"] = sectors[sym]
         if analyst.get(sym):
@@ -1214,6 +1388,9 @@ def main():
         shares = f.get("shares")
         if price and shares:
             r["mcap"] = price * shares
+        elif wide.get(sym, {}).get("cap"):
+            # No filings to derive it from, but the listing itself carries one.
+            r["mcap"] = wide[sym]["cap"]
         if price and f.get("epsTTM"):
             r["pe"] = price / f["epsTTM"] if f["epsTTM"] > 0 else None
         if r.get("mcap") and f.get("revTTM"):
@@ -1231,7 +1408,9 @@ def main():
         rows.append(r)
 
     scored = sum(1 for r in rows if r.get("sc", {}).get("total") is not None)
-    log(f"    {len(rows)} rows, {scored} fully scored")
+    tech_only = sum(1 for r in rows if r["s"] not in core_set)
+    log(f"    {len(rows)} rows, {scored} fully scored, "
+        f"{tech_only} technical-only")
 
     out = {
         "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
@@ -1239,7 +1418,8 @@ def main():
         "sources": {
             "fundamentals": "SEC EDGAR XBRL frames",
             "prices": "Nasdaq historical API",
-            "universe": "Wikipedia S&P 500 + Nasdaq-100",
+            "universe": "Wikipedia S&P 500 + Nasdaq-100, widened with the "
+                        "Nasdaq screener listing for technical-only rows",
         },
         "rows": rows,
     }

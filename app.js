@@ -40,6 +40,7 @@ var LS = {
   recent: 'sa_recent',
   screens: 'sa_screens',
   sectors: 'sa_sectors',
+  conds: 'sa_conds',
   /* A GitHub token, so the app can write the alert list into the repo the
      scheduled checker reads. It stays on this device and is never sent
      anywhere but api.github.com. */
@@ -103,6 +104,18 @@ function big(v) {
   return '$' + num(v, 0);
 }
 function cls(v) { return v > 0 ? 'up' : v < 0 ? 'down' : ''; }
+
+/* RSI is not a quality score - both ends are the signal. Overbought reads
+   warm, oversold reads cool, and the broad middle is deliberately muted so
+   the eye lands on the extremes. */
+function rsiColor(v) {
+  if (v == null) return 'var(--muted)';
+  if (v >= 70) return 'var(--loss)';
+  if (v >= 60) return 'var(--watch)';
+  if (v <= 30) return 'var(--gain)';
+  if (v <= 40) return '#7E9A3C';
+  return 'var(--muted)';
+}
 
 /* Colour ramp for 0..100 scores: red -> brass -> green. */
 function scoreColor(v) {
@@ -637,7 +650,15 @@ function onSearch(term) {
   }).join('');
 }
 
-function idxLabel(i) { return i === 'sp500' ? 'S&P 500' : i === 'ndx' ? 'נאסד״ק 100' : i; }
+function idxLabel(i) {
+  return i === 'sp500' ? 'S&P 500'
+       : i === 'ndx' ? 'נאסד״ק 100'
+       /* Everything liquid enough to chart that is in neither index. These
+          rows carry technicals only - no filings behind them - which is all
+          this screener asks for. */
+       : i === 'wide' ? 'מחוץ למדדים'
+       : i;
+}
 
 function renderRecent() {
   var rec = store.get(LS.recent, []);
@@ -2424,42 +2445,66 @@ function renderJournal() {
 }
 
 /* -------------------------------------------------------------- screener */
+/* Technical only, on purpose.
+ *
+ * This screen used to mix five fundamental ranges (P/E, margins, ROE, debt,
+ * revenue growth) with the technical ones, and sorted everything by a score
+ * that is 80% fundamental by weight. For someone who reads charts and does
+ * their analysis in TradingView, that is a filter set they never touch and a
+ * ranking that argues against the ones they do.
+ *
+ * The fundamentals are still computed nightly and still feed the analysis
+ * sheet, the sector-strength card and the score-change digest. They are gone
+ * from here, which is a different thing from gone.
+ */
+var CONDS = [
+  ['ma150up', 'מעל MA150', function (t) { return t.vma150 > 0; }],
+  ['ma150dn', 'מתחת MA150', function (t) { return t.vma150 < 0; }],
+  ['ma200up', 'מעל MA200', function (t) { return t.vma200 > 0; }],
+  ['ma200dn', 'מתחת MA200', function (t) { return t.vma200 < 0; }],
+  ['golden', 'גולדן קרוס', function (t) {
+    return t.cross150 === 'golden' || t.cross200 === 'golden'; }],
+  ['death', 'דד קרוס', function (t) {
+    return t.cross150 === 'death' || t.cross200 === 'death'; }],
+  ['volup', 'נפח חריג', function (t) { return t.volRatio >= 2; }]
+];
+
 var FILTERS = [
-  ['score', 'ציון כולל', 0, 100,
-   'הציון שלנו, 0 עד 100, משוקלל מחמישה ממדים: תמחור, צמיחה, רווחיות, ' +
-   'איתנות פיננסית ומומנטום. גבוה = החברה נראית טוב יותר בכל הממדים יחד.'],
-  ['mcapB', 'שווי שוק (מיליארד $)', 0, 5000,
-   'שווי כל החברה בבורסה — מחיר המניה כפול מספר המניות. מסנן לפי גודל: ' +
-   'חברות גדולות בדרך כלל יציבות יותר, קטנות תנודתיות יותר.'],
-  ['pe', 'מכפיל רווח', 0, 100,
-   'מחיר המניה חלקי הרווח השנתי למניה — כמה שנים של רווח נוכחי משלמים ' +
-   'עליה. נמוך נחשב זול, אבל לפעמים משקף ציפייה שהרווח עומד לרדת. ' +
-   'חברות בהפסד לא מקבלות מכפיל כלל.'],
-  ['revGrowth', 'צמיחת הכנסות %', -50, 200,
-   'בכמה אחוזים גדלו ההכנסות לעומת השנה הקודמת. מודד אם העסק מתרחב.'],
-  ['netMargin', 'מרג׳ין נקי %', -50, 100,
-   'איזה אחוז מההכנסות נשאר כרווח אחרי כל ההוצאות, הריבית והמסים. ' +
-   'גבוה = החברה שומרת יותר מכל שקל מכירות.'],
-  ['roe', 'תשואה על ההון %', -50, 150,
-   'כמה רווח החברה מייצרת על כל שקל של הון עצמי. מודד עד כמה ההנהלה ' +
-   'מנצלת ביעילות את כספי בעלי המניות.'],
-  ['debtToEquity', 'חוב להון %', 0, 500,
-   'היחס בין החוב הפיננסי להון העצמי. גבוה = מינוף גדול יותר, כלומר ' +
-   'רגישות גבוהה יותר לריבית ולהאטה.'],
   ['rsi', 'RSI', 0, 100,
-   'מדד תנופה טכני, 0 עד 100, שמשווה ימי עליות לימי ירידות בחודש וחצי ' +
-   'האחרונים. מעל 70 נחשב קנוי־יתר, מתחת ל־30 מכור־יתר.'],
+   'מדד תנופה, 0 עד 100, שמשווה ימי עליות לימי ירידות בחודש וחצי האחרונים. ' +
+   'מעל 70 נחשב קנוי־יתר, מתחת ל־30 מכור־יתר.'],
   ['vma150', 'מעל ממוצע 150 %', -80, 200,
-   'בכמה אחוזים המחיר מעל או מתחת לממוצע 150 הימים. ממוצע ביניים — ' +
-   'מעליו = מגמת ביניים חיובית, מתחתיו = שלילית.'],
+   'בכמה אחוזים המחיר מעל או מתחת לממוצע 150 הימים. חיובי = מעל. ' +
+   'לתנאי פשוט של מעל/מתחת יש כפתור למעלה; כאן אפשר לדרוש מרחק מסוים.'],
   ['vma200', 'מעל ממוצע 200 %', -80, 200,
    'בכמה אחוזים המחיר מעל או מתחת לממוצע 200 הימים. מעל = מגמה ארוכת ' +
    'טווח עולה, מתחת = יורדת.'],
+  ['vma50', 'מעל ממוצע 50 %', -80, 200,
+   'בכמה אחוזים המחיר מעל או מתחת לממוצע 50 הימים — המגמה הקצרה.'],
   ['from52High', 'מרחק משיא 52ש׳ %', -90, 0,
    'כמה אחוזים המחיר רחוק מהשיא של 12 החודשים האחרונים. תמיד אפס או ' +
    'שלילי — אפס אומר שהמניה בשיא.'],
+  ['from52Low', 'מרחק משפל 52ש׳ %', 0, 900,
+   'כמה אחוזים המחיר מעל השפל של 12 החודשים האחרונים. גבוה = כבר רחוק ' +
+   'מהתחתית.'],
+  ['volRatio', 'נפח מול ממוצע', 0, 20,
+   'נפח המסחר של היום חלקי ממוצע 60 הימים. 1 הוא יום רגיל; 2 ומעלה הוא ' +
+   'יום שמישהו שם לב אליו.'],
+  ['avgVolM', 'נפח יומי ממוצע (מיליון)', 0, 200,
+   'כמה מניות נסחרות ביום בממוצע, במיליונים. מסנן נייר שאי אפשר להיכנס ' +
+   'אליו ולצאת ממנו בלי להזיז את המחיר.'],
+  ['atrPct', 'תנודתיות ATR %', 0, 30,
+   'הטווח היומי הממוצע כאחוז מהמחיר. מודד כמה המניה זזה ביום רגיל — ' +
+   'רלוונטי לגודל הסטופ.'],
+  ['chg1m', 'תשואה חודש %', -80, 200,
+   'שינוי המחיר ב־21 ימי המסחר האחרונים.'],
+  ['chg3m', 'תשואה 3ח %', -90, 300,
+   'שינוי המחיר בשלושת החודשים האחרונים.'],
   ['chg12m', 'תשואה 12ח %', -90, 500,
-   'שינוי המחיר ב־12 החודשים האחרונים, בלי דיבידנדים.']
+   'שינוי המחיר ב־12 החודשים האחרונים, בלי דיבידנדים.'],
+  ['mcapB', 'שווי שוק (מיליארד $)', 0, 5000,
+   'שווי כל החברה בבורסה. לא ניתוח פונדמנטלי — מסנן גודל: מניות קטנות ' +
+   'תנודתיות יותר וקשות יותר למימוש.']
 ];
 
 /* iOS shows no minus key on the decimal keypad, so seven of the filters -
@@ -2506,8 +2551,31 @@ function paintSigns() {
   }
 }
 
+function renderCondChips() {
+  var box = $('#condChips');
+  if (!box) return;
+  var on = store.get(LS.conds, []);
+  box.innerHTML = CONDS.map(function (c) {
+    return '<button class="chip ' + (on.indexOf(c[0]) >= 0 ? 'on' : '') +
+      '" onclick="toggleCond(\'' + c[0] + '\')">' + c[1] + '</button>';
+  }).join('');
+}
+
+/* A chip that is on is a condition that must hold. Two contradictory ones
+   (above and below the same average) simply match nothing, which is a truer
+   answer than quietly dropping one of them. */
+function toggleCond(k) {
+  var on = store.get(LS.conds, []);
+  var i = on.indexOf(k);
+  if (i >= 0) on.splice(i, 1); else on.push(k);
+  store.set(LS.conds, on);
+  renderCondChips();
+  haptic(6);
+}
+
 function renderFilters() {
   renderScreens();
+  renderCondChips();
   renderSectorChips();
   var saved = store.get(LS.filters, {});
   $('#filterRows').innerHTML = FILTERS.map(function (f) {
@@ -2612,6 +2680,7 @@ function resetFilters() {
   store.set(LS.filters, {});
   store.set(LS.idx, Object.keys(availableIndices()));
   store.set(LS.sectors, []);
+  store.set(LS.conds, []);
   renderFilters();
   $('#screenResults').innerHTML = '<div class="msg">הגדר פילטרים ולחץ סרוק.</div>';
 }
@@ -2638,15 +2707,19 @@ function renderScreens() {
 
 function saveScreen() {
   var flt = readFilters();
-  if (!Object.keys(flt).length) {
-    $('#screenCount').textContent = 'אין פילטרים לשמור';
+  /* Conditions count as a screen in their own right. "Above the 200 with a
+     golden cross" is a complete idea and needs no numeric range at all -
+     requiring one meant the most natural screens here could not be saved. */
+  var conds = store.get(LS.conds, []);
+  if (!Object.keys(flt).length && !conds.length) {
+    $('#screenCount').textContent = 'אין מה לשמור — בחר תנאי או טווח';
     return;
   }
   var name = (prompt('שם לסינון:') || '').trim();
   if (!name) return;
   var list = savedScreens();
   var entry = { name: name, f: flt, i: store.get(LS.idx, []),
-                sec: store.get(LS.sectors, []) };
+                sec: store.get(LS.sectors, []), c: conds };
   var at = -1;
   for (var i = 0; i < list.length; i++) if (list[i].name === name) at = i;
   if (at >= 0) list[at] = entry; else list.push(entry);
@@ -2660,6 +2733,7 @@ function loadScreen(i) {
   store.set(LS.filters, sv.f || {});
   if (sv.i && sv.i.length) store.set(LS.idx, sv.i);
   store.set(LS.sectors, sv.sec || []);
+  store.set(LS.conds, sv.c || []);
   renderFilters();
   runScreen();
 }
@@ -2695,11 +2769,10 @@ function readFilters() {
 /* Where each filter key reads from in a snapshot row. */
 function fieldValue(row, key) {
   switch (key) {
-    case 'score': return row.sc ? row.sc.total : null;
     case 'mcapB': return row.mcap != null ? row.mcap / 1e9 : null;
-    case 'pe': return row.pe;
+    case 'avgVolM': return row.t && row.t.avgVol != null
+      ? row.t.avgVol / 1e6 : null;
     default:
-      if (row.f && row.f[key] != null) return row.f[key];
       if (row.t && row.t[key] != null) return row.t[key];
       return null;
   }
@@ -2723,24 +2796,30 @@ function runScreen() {
   });
 
   var fields = Object.keys(flt);
+  var conds = store.get(LS.conds, []).map(function (k) {
+    for (var i = 0; i < CONDS.length; i++) if (CONDS[i][0] === k) return CONDS[i][2];
+    return null;
+  }).filter(Boolean);
 
   var hits = SNAP.rows.filter(function (r) {
     var inIdx = (r.i || []).some(function (m) { return idx.indexOf(m) >= 0; });
     if (!inIdx) return false;
     if (sectors.length && sectors.indexOf(r.sec) < 0) return false;
+    var t = r.t || {};
+    for (var c = 0; c < conds.length; c++) if (!conds[c](t)) return false;
     for (var i = 0; i < fields.length; i++) {
-      var k = fields[i], c = flt[k], v = fieldValue(r, k);
+      var k = fields[i], cc = flt[k], v = fieldValue(r, k);
       if (v == null) return false;
-      if (c.min != null && v < c.min) return false;
-      if (c.max != null && v > c.max) return false;
+      if (cc.min != null && v < cc.min) return false;
+      if (cc.max != null && v > cc.max) return false;
     }
     return true;
   });
 
-  hits.sort(function (a, b) {
-    var sa = (a.sc && a.sc.total) || 0, sb = (b.sc && b.sc.total) || 0;
-    return sb - sa;
-  });
+  /* Deliberately unsorted. The old default ranked by a score that is mostly
+     fundamental, which quietly argued with the technical conditions above it.
+     Snapshot order is alphabetical by symbol - stable, and it does not
+     pretend one match is better than another. */
 
   if (!hits.length) {
     box.innerHTML = '<div class="card-h"><span>תוצאות</span></div>' +
@@ -2753,19 +2832,28 @@ function runScreen() {
     '<span class="sub">' + hits.length + ' מניות' +
     (hits.length > shown.length ? ' · מוצגות ' + shown.length : '') + '</span></div>' +
     shown.map(function (r, n) {
-      var sc = r.sc ? r.sc.total : null;
       var t = r.t || {};
+      /* RSI in the badge rather than the fundamental score: it is the one
+         number this screen is actually built around, and unlike the score it
+         exists for every row, including the thousands with no filings. */
+      var rsi = t.rsi == null ? null : Math.round(t.rsi);
       // Capped so a 60-row result set does not trail in for four seconds.
       var delay = Math.min(n, 14) * 28;
+      var marks = [];
+      if (t.cross150 === 'golden' || t.cross200 === 'golden') marks.push('גולדן');
+      if (t.cross150 === 'death' || t.cross200 === 'death') marks.push('דד');
+      if (t.volRatio >= 2) marks.push('נפח ×' + num(t.volRatio, 1));
       return '<button class="hit" style="animation-delay:' + delay +
         'ms" onclick="analyze(\'' + r.s + '\')">' +
-        '<span class="hit-score" style="background:' + scoreColor(sc) +
-          '22;color:' + scoreColor(sc) + '">' + (sc == null ? '—' : sc) + '</span>' +
+        '<span class="hit-score" style="background:' + rsiColor(rsi) +
+          '22;color:' + rsiColor(rsi) + '">' +
+          (rsi == null ? '—' : rsi) + '</span>' +
         '<span class="hit-id">' +
           '<span class="sym">' + r.s + '</span>' +
           '<span class="nm">' + esc(r.n || '') + '</span>' +
-          '<span class="mini">' + big(r.mcap) + ' · מכפיל ' +
-            (r.pe ? num(r.pe, 1) : '—') + '</span>' +
+          '<span class="mini">' +
+            (marks.length ? marks.join(' · ') + ' · ' : '') +
+            'MA200 ' + pct(t.vma200, 0) + '</span>' +
         '</span>' +
         '<span class="hit-px">' +
           '<span class="pr">' + money(t.price) + '</span>' +
