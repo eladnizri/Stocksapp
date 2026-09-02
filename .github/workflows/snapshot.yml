@@ -46,8 +46,17 @@ jobs:
           MSG: ${{ github.event.head_commit.message }}
         run: |
           if [ "${{ github.event_name }}" != "push" ]; then
-            echo "limit=${{ github.event.inputs.limit || 0 }}" >> "$GITHUB_OUTPUT"
-            echo "commit=true" >> "$GITHUB_OUTPUT"
+            LIMIT="${{ github.event.inputs.limit || 0 }}"
+            echo "limit=$LIMIT" >> "$GITHUB_OUTPUT"
+            # Only a full scan may be committed. A limited run produces a
+            # partial snapshot, and committing that replaces the real one -
+            # a 40-symbol smoke test wiped a 518-row file exactly this way.
+            if [ "$LIMIT" = "0" ]; then
+              echo "commit=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "commit=false" >> "$GITHUB_OUTPUT"
+              echo "limited scan ($LIMIT symbols): inspecting only, not committing"
+            fi
           elif printf '%s' "$MSG" | grep -qF '[full-scan]'; then
             echo "limit=0" >> "$GITHUB_OUTPUT"
             echo "commit=true" >> "$GITHUB_OUTPUT"
