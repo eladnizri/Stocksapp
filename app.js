@@ -2445,111 +2445,51 @@ function renderJournal() {
 }
 
 /* -------------------------------------------------------------- screener */
-/* Technical only, on purpose.
+/* Technical only, and now yes/no only.
  *
- * This screen used to mix five fundamental ranges (P/E, margins, ROE, debt,
- * revenue growth) with the technical ones, and sorted everything by a score
- * that is 80% fundamental by weight. For someone who reads charts and does
- * their analysis in TradingView, that is a filter set they never touch and a
- * ranking that argues against the ones they do.
+ * Two redesigns landed here. The first replaced five fundamental ranges
+ * (P/E, margins, ROE, debt, revenue growth) with technical ones, because
+ * someone who reads charts and does their analysis in TradingView never
+ * touches a P/E filter. The second went further: even the technical ranges
+ * are gone. "RSI between 40 and 60" is not how anyone starts a scan - "is it
+ * overbought" is. Every condition here is a chip, on or off, and a screen is
+ * just the set of chips that are lit.
  *
- * The fundamentals are still computed nightly and still feed the analysis
- * sheet, the sector-strength card and the score-change digest. They are gone
- * from here, which is a different thing from gone.
+ * The fundamentals, and the sector labels, are still computed nightly and
+ * still feed the analysis sheet, the sector-strength card and the
+ * score-change digest. Neither appears on this screen any more.
  */
+var LIQUID_MIN_SHARES = 1e6;    // a day's volume below this is hard to trade
+var CAP_SPLIT = 10e9;           // the usual large-cap line
+
 var CONDS = [
-  ['ma150up', 'מעל MA150', function (t) { return t.vma150 > 0; }],
-  ['ma150dn', 'מתחת MA150', function (t) { return t.vma150 < 0; }],
-  ['ma200up', 'מעל MA200', function (t) { return t.vma200 > 0; }],
-  ['ma200dn', 'מתחת MA200', function (t) { return t.vma200 < 0; }],
-  ['golden', 'גולדן קרוס', function (t) {
-    return t.cross150 === 'golden' || t.cross200 === 'golden'; }],
-  ['death', 'דד קרוס', function (t) {
-    return t.cross150 === 'death' || t.cross200 === 'death'; }],
-  ['volup', 'נפח חריג', function (t) { return t.volRatio >= 2; }]
+  ['ma150up', 'מעל MA150', function (r) { return r.t.vma150 > 0; }],
+  ['ma150dn', 'מתחת MA150', function (r) { return r.t.vma150 < 0; }],
+  ['ma200up', 'מעל MA200', function (r) { return r.t.vma200 > 0; }],
+  ['ma200dn', 'מתחת MA200', function (r) { return r.t.vma200 < 0; }],
+  ['golden', 'גולדן קרוס', function (r) {
+    return r.t.cross150 === 'golden' || r.t.cross200 === 'golden'; }],
+  ['death', 'דד קרוס', function (r) {
+    return r.t.cross150 === 'death' || r.t.cross200 === 'death'; }],
+  /* Two different questions about volume, kept separate on purpose: most
+     days sit a little above or below their own average, which is normal and
+     worth almost nothing; a spike is the rare day someone actually noticed
+     the stock. Collapsing them into one chip would hide whichever half a
+     single threshold did not cover. */
+  ['volabove', 'נפח מעל הממוצע', function (r) { return r.t.volRatio > 1; }],
+  ['volbelow', 'נפח מתחת לממוצע', function (r) { return r.t.volRatio < 1; }],
+  ['volspike', 'נפח חריג (×2)', function (r) { return r.t.volRatio >= 2; }],
+  ['rsiOB', 'RSI קנוי־יתר (70+)', function (r) { return r.t.rsi >= 70; }],
+  ['rsiOS', 'RSI מכור־יתר (30-)', function (r) { return r.t.rsi <= 30; }],
+  ['near52hi', 'קרוב לשיא 52ש׳', function (r) { return r.t.from52High >= -5; }],
+  ['near52lo', 'קרוב לשפל 52ש׳', function (r) { return r.t.from52Low <= 5; }],
+  ['liquid', 'נזיל למסחר', function (r) {
+    return r.t.avgVol >= LIQUID_MIN_SHARES; }],
+  ['capBig', 'שווי שוק גדול (10B+)', function (r) {
+    return r.mcap >= CAP_SPLIT; }],
+  ['capSmall', 'שווי שוק קטן', function (r) {
+    return r.mcap != null && r.mcap < CAP_SPLIT; }]
 ];
-
-var FILTERS = [
-  ['rsi', 'RSI', 0, 100,
-   'מדד תנופה, 0 עד 100, שמשווה ימי עליות לימי ירידות בחודש וחצי האחרונים. ' +
-   'מעל 70 נחשב קנוי־יתר, מתחת ל־30 מכור־יתר.'],
-  ['vma150', 'מעל ממוצע 150 %', -80, 200,
-   'בכמה אחוזים המחיר מעל או מתחת לממוצע 150 הימים. חיובי = מעל. ' +
-   'לתנאי פשוט של מעל/מתחת יש כפתור למעלה; כאן אפשר לדרוש מרחק מסוים.'],
-  ['vma200', 'מעל ממוצע 200 %', -80, 200,
-   'בכמה אחוזים המחיר מעל או מתחת לממוצע 200 הימים. מעל = מגמה ארוכת ' +
-   'טווח עולה, מתחת = יורדת.'],
-  ['vma50', 'מעל ממוצע 50 %', -80, 200,
-   'בכמה אחוזים המחיר מעל או מתחת לממוצע 50 הימים — המגמה הקצרה.'],
-  ['from52High', 'מרחק משיא 52ש׳ %', -90, 0,
-   'כמה אחוזים המחיר רחוק מהשיא של 12 החודשים האחרונים. תמיד אפס או ' +
-   'שלילי — אפס אומר שהמניה בשיא.'],
-  ['from52Low', 'מרחק משפל 52ש׳ %', 0, 900,
-   'כמה אחוזים המחיר מעל השפל של 12 החודשים האחרונים. גבוה = כבר רחוק ' +
-   'מהתחתית.'],
-  ['volRatio', 'נפח מול ממוצע', 0, 20,
-   'נפח המסחר של היום חלקי ממוצע 60 הימים. 1 הוא יום רגיל; 2 ומעלה הוא ' +
-   'יום שמישהו שם לב אליו.'],
-  ['avgVolM', 'נפח יומי ממוצע (מיליון)', 0, 200,
-   'כמה מניות נסחרות ביום בממוצע, במיליונים. מסנן נייר שאי אפשר להיכנס ' +
-   'אליו ולצאת ממנו בלי להזיז את המחיר.'],
-  ['atrPct', 'תנודתיות ATR %', 0, 30,
-   'הטווח היומי הממוצע כאחוז מהמחיר. מודד כמה המניה זזה ביום רגיל — ' +
-   'רלוונטי לגודל הסטופ.'],
-  ['chg1m', 'תשואה חודש %', -80, 200,
-   'שינוי המחיר ב־21 ימי המסחר האחרונים.'],
-  ['chg3m', 'תשואה 3ח %', -90, 300,
-   'שינוי המחיר בשלושת החודשים האחרונים.'],
-  ['chg12m', 'תשואה 12ח %', -90, 500,
-   'שינוי המחיר ב־12 החודשים האחרונים, בלי דיבידנדים.'],
-  ['mcapB', 'שווי שוק (מיליארד $)', 0, 5000,
-   'שווי כל החברה בבורסה. לא ניתוח פונדמנטלי — מסנן גודל: מניות קטנות ' +
-   'תנודתיות יותר וקשות יותר למימוש.']
-];
-
-/* iOS shows no minus key on the decimal keypad, so seven of the filters -
-   and "מרחק משיא", whose range is entirely negative - could not be given a
-   valid value at all. The toggle sits inside the field's own padding rather
-   than beside it, so it costs no width on a narrow screen. */
-function numField(id, ph, val, signed) {
-  var v = val != null ? val : '';
-  if (!signed) {
-    return '<input id="' + id + '" inputmode="decimal" placeholder="' +
-      esc(ph) + '" value="' + v + '">';
-  }
-  return '<span class="numf">' +
-    '<button type="button" class="sgn" onclick="flipSign(\'' + id + '\')" ' +
-      'aria-label="חיובי או שלילי">\u00b1</button>' +
-    '<input id="' + id + '" inputmode="decimal" placeholder="' + esc(ph) +
-      '" value="' + v + '" oninput="paintSigns()">' +
-    '</span>';
-}
-
-function flipSign(id) {
-  var el = $('#' + id);
-  if (!el) return;
-  var v = (el.value || '').trim();
-  if (v === '' ) el.value = '-';          // ready for the digits that follow
-  else if (v === '-') el.value = '';
-  else if (v.charAt(0) === '-') el.value = v.slice(1);
-  else el.value = '-' + v;
-  paintSigns();
-  haptic(6);
-}
-
-/* The button shows the sign the field currently carries, so a minus is
-   visible without reading the number. */
-function paintSigns() {
-  var els = document.querySelectorAll('.numf');
-  for (var i = 0; i < els.length; i++) {
-    var inp = els[i].querySelector('input');
-    var btn = els[i].querySelector('.sgn');
-    if (!inp || !btn) continue;
-    var neg = (inp.value || '').trim().charAt(0) === '-';
-    btn.classList.toggle('on', neg);
-    btn.textContent = neg ? '\u2212' : '\u00b1';
-  }
-}
 
 function renderCondChips() {
   var box = $('#condChips');
@@ -2576,33 +2516,9 @@ function toggleCond(k) {
 function renderFilters() {
   renderScreens();
   renderCondChips();
-  renderSectorChips();
-  var saved = store.get(LS.filters, {});
-  $('#filterRows').innerHTML = FILTERS.map(function (f) {
-    var v = saved[f[0]] || {};
-    // Only where a negative value is actually in range.
-    var signed = f[2] < 0 || f[3] < 0;
-    return '<div class="frow">' +
-      '<span class="lb"><span class="lb-t">' + f[1] + '</span>' +
-        (f[4] ? '<button class="info" onclick="toggleHelp(\'' + f[0] +
-          '\')" aria-label="הסבר על ' + f[1] + '">i</button>' : '') +
-      '</span>' +
-      /* Just "from" and "to": the bounds are stated in the info panel below,
-         and repeating them here clipped to nonsense once the sign button took
-         part of the field. */
-      numField('f-' + f[0] + '-min', 'מ־', v.min, signed) +
-      numField('f-' + f[0] + '-max', 'עד', v.max, signed) +
-      '</div>' +
-      (f[4] ? '<div class="fhelp" id="h-' + f[0] + '">' +
-        '<b class="rng">טווח בנתונים: ' + f[2] + ' עד ' + f[3] + '</b>' +
-        f[4] + '</div>' : '');
-  }).join('');
 
-  // Before the early return below, so saved negatives show their sign either way.
-  paintSigns();
-
-  /* Build the index chips from what the snapshot actually contains, so an
-     index that failed to scrape never shows up as a filter matching nothing. */
+  /* Built from what the snapshot actually contains, so an index that failed
+     to scrape never shows up as a filter matching nothing. */
   var counts = availableIndices();
   var keys = Object.keys(counts);
   if (!keys.length) {
@@ -2618,43 +2534,6 @@ function renderFilters() {
       '" onclick="toggleIdx(\'' + k + '\')">' + idxLabel(k) +
       ' <span style="opacity:.6">· ' + counts[k] + '</span></button>';
   }).join('');
-}
-
-function availableSectors() {
-  var counts = {};
-  if (!SNAP) return counts;
-  SNAP.rows.forEach(function (r) {
-    if (r.sec) counts[r.sec] = (counts[r.sec] || 0) + 1;
-  });
-  return counts;
-}
-
-function renderSectorChips() {
-  var box = $('#secChips');
-  if (!box) return;
-  var counts = availableSectors();
-  var keys = Object.keys(counts).sort(function (a, b) {
-    return counts[b] - counts[a];
-  });
-  if (!keys.length) { box.innerHTML = ''; return; }
-  /* Empty selection means "all", so the screener does not start out excluding
-     everything and reporting no matches. */
-  var on = store.get(LS.sectors, []).filter(function (k) {
-    return keys.indexOf(k) >= 0;
-  });
-  box.innerHTML = keys.map(function (k) {
-    return '<button class="chip ' + (on.indexOf(k) >= 0 ? 'on' : '') +
-      '" onclick="toggleSector(\'' + k + '\')">' + k +
-      ' <span style="opacity:.6">· ' + counts[k] + '</span></button>';
-  }).join('');
-}
-
-function toggleSector(k) {
-  var on = store.get(LS.sectors, []);
-  var i = on.indexOf(k);
-  if (i >= 0) on.splice(i, 1); else on.push(k);
-  store.set(LS.sectors, on);
-  renderSectorChips();
 }
 
 function availableIndices() {
@@ -2677,12 +2556,10 @@ function toggleIdx(k) {
 }
 
 function resetFilters() {
-  store.set(LS.filters, {});
   store.set(LS.idx, Object.keys(availableIndices()));
-  store.set(LS.sectors, []);
   store.set(LS.conds, []);
   renderFilters();
-  $('#screenResults').innerHTML = '<div class="msg">הגדר פילטרים ולחץ סרוק.</div>';
+  $('#screenResults').innerHTML = '<div class="msg">בחר תנאים ולחץ סרוק.</div>';
 }
 
 /* -------------------------------------------------------- saved screens */
@@ -2693,8 +2570,8 @@ function renderScreens() {
   if (!box) return;
   var list = savedScreens();
   if (!list.length) {
-    box.innerHTML = '<span class="score-note">אין סינונים שמורים. הגדר ' +
-      'פילטרים ולחץ שמור.</span>';
+    box.innerHTML = '<span class="score-note">אין סינונים שמורים. בחר ' +
+      'תנאים ולחץ שמור.</span>';
     return;
   }
   box.innerHTML = '<div class="chips">' + list.map(function (sv, i) {
@@ -2706,20 +2583,15 @@ function renderScreens() {
 }
 
 function saveScreen() {
-  var flt = readFilters();
-  /* Conditions count as a screen in their own right. "Above the 200 with a
-     golden cross" is a complete idea and needs no numeric range at all -
-     requiring one meant the most natural screens here could not be saved. */
   var conds = store.get(LS.conds, []);
-  if (!Object.keys(flt).length && !conds.length) {
-    $('#screenCount').textContent = 'אין מה לשמור — בחר תנאי או טווח';
+  if (!conds.length) {
+    $('#screenCount').textContent = 'אין מה לשמור — בחר תנאי אחד לפחות';
     return;
   }
   var name = (prompt('שם לסינון:') || '').trim();
   if (!name) return;
   var list = savedScreens();
-  var entry = { name: name, f: flt, i: store.get(LS.idx, []),
-                sec: store.get(LS.sectors, []), c: conds };
+  var entry = { name: name, i: store.get(LS.idx, []), c: conds };
   var at = -1;
   for (var i = 0; i < list.length; i++) if (list[i].name === name) at = i;
   if (at >= 0) list[at] = entry; else list.push(entry);
@@ -2730,9 +2602,7 @@ function saveScreen() {
 function loadScreen(i) {
   var sv = savedScreens()[i];
   if (!sv) return;
-  store.set(LS.filters, sv.f || {});
   if (sv.i && sv.i.length) store.set(LS.idx, sv.i);
-  store.set(LS.sectors, sv.sec || []);
   store.set(LS.conds, sv.c || []);
   renderFilters();
   runScreen();
@@ -2745,57 +2615,16 @@ function deleteScreen(i) {
   renderScreens();
 }
 
-/* Class rather than the hidden attribute, so the panel can expand into place
-   instead of the rows below it jumping by its full height in one frame. */
-function toggleHelp(key) {
-  var el = $('#h-' + key);
-  if (el) el.classList.toggle('open');
-}
-
-function readFilters() {
-  var out = {};
-  FILTERS.forEach(function (f) {
-    var mn = parseFloat(($('#f-' + f[0] + '-min') || {}).value);
-    var mx = parseFloat(($('#f-' + f[0] + '-max') || {}).value);
-    var o = {};
-    if (!isNaN(mn)) o.min = mn;
-    if (!isNaN(mx)) o.max = mx;
-    if (o.min != null || o.max != null) out[f[0]] = o;
-  });
-  store.set(LS.filters, out);
-  return out;
-}
-
-/* Where each filter key reads from in a snapshot row. */
-function fieldValue(row, key) {
-  switch (key) {
-    case 'mcapB': return row.mcap != null ? row.mcap / 1e9 : null;
-    case 'avgVolM': return row.t && row.t.avgVol != null
-      ? row.t.avgVol / 1e6 : null;
-    default:
-      if (row.t && row.t[key] != null) return row.t[key];
-      return null;
-  }
-}
-
 function runScreen() {
   var box = $('#screenResults');
   if (!SNAP) { box.innerHTML = '<div class="msg">הנתונים עדיין נטענים…</div>'; return; }
 
-  var flt = readFilters();
   var idxKeys = Object.keys(availableIndices());
   var idx = store.get(LS.idx, idxKeys).filter(function (k) {
     return idxKeys.indexOf(k) >= 0;
   });
   if (!idx.length) idx = idxKeys;
 
-  // No sector selected means no sector constraint, not "exclude everything".
-  var secKeys = Object.keys(availableSectors());
-  var sectors = store.get(LS.sectors, []).filter(function (k) {
-    return secKeys.indexOf(k) >= 0;
-  });
-
-  var fields = Object.keys(flt);
   var conds = store.get(LS.conds, []).map(function (k) {
     for (var i = 0; i < CONDS.length; i++) if (CONDS[i][0] === k) return CONDS[i][2];
     return null;
@@ -2804,15 +2633,8 @@ function runScreen() {
   var hits = SNAP.rows.filter(function (r) {
     var inIdx = (r.i || []).some(function (m) { return idx.indexOf(m) >= 0; });
     if (!inIdx) return false;
-    if (sectors.length && sectors.indexOf(r.sec) < 0) return false;
-    var t = r.t || {};
-    for (var c = 0; c < conds.length; c++) if (!conds[c](t)) return false;
-    for (var i = 0; i < fields.length; i++) {
-      var k = fields[i], cc = flt[k], v = fieldValue(r, k);
-      if (v == null) return false;
-      if (cc.min != null && v < cc.min) return false;
-      if (cc.max != null && v > cc.max) return false;
-    }
+    if (!r.t) return false;
+    for (var c = 0; c < conds.length; c++) if (!conds[c](r)) return false;
     return true;
   });
 
@@ -2823,7 +2645,7 @@ function runScreen() {
 
   if (!hits.length) {
     box.innerHTML = '<div class="card-h"><span>תוצאות</span></div>' +
-      '<div class="msg">אף מניה לא עברה את הסינון. נסה להרחיב את הטווחים.</div>';
+      '<div class="msg">אף מניה לא עברה את הסינון. נסה פחות תנאים.</div>';
     return;
   }
 
