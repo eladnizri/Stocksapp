@@ -11,6 +11,7 @@ on:
       - 'scripts/probe_browser_apis.py'
       - 'scripts/probe_sector.py'
       - 'scripts/probe_analyst.py'
+      - 'scripts/probe_universe.py'
       - '.github/workflows/probe.yml'
 
 jobs:
@@ -35,3 +36,10 @@ jobs:
       - name: Probe server-side quote sources
         if: always()
         run: python scripts/probe_server_quotes.py
+
+      # Can the same endpoint that already supplies sector labels also give
+      # the scanner a market cap / volume cutoff for widening the universe
+      # beyond S&P 500 + Nasdaq-100, without a request per symbol?
+      - name: Probe a wider stock universe
+        if: always()
+        run: python scripts/probe_universe.py
