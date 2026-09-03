@@ -127,6 +127,9 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   font-size: .72rem; font-weight: 600; letter-spacing: .05em;
   color: var(--muted); margin-bottom: 3px;
 }
+/* The header's buttons sit as one group at the end of the row, so adding a
+   second one does not push the title around. */
+.head-btns { display: flex; align-items: center; gap: 8px; flex: none; }
 .icon-btn {
   width: 38px; height: 38px; border-radius: 12px; flex: none;
   display: grid; place-items: center;
