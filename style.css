@@ -695,6 +695,10 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   -webkit-user-select: text; user-select: text;
 }
 .sync-box::-webkit-scrollbar { display: none; }
+/* A one-line code someone has to read off the screen and send on, rather
+   than a JSON blob to scroll through: wrap it so all of it is visible at
+   once, since a hidden horizontal scrollbar makes it look truncated. */
+.sync-box.wrap { white-space: pre-wrap; word-break: break-all; }
 /* An <a> styled as .btn needs the padding box a <button> gets for free. */
 a.btn { display: block; text-decoration: none; }
 

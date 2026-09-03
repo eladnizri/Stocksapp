@@ -61,7 +61,17 @@ var LS = {
      Kept as a setting rather than baked in so the URL is the deployer's, and
      so the app still runs - on the repo file plus whatever the public
      proxies manage - before one exists. */
-  api: 'sa_api'
+  api: 'sa_api',
+  /* Who this copy of the app belongs to, for anyone it was shared with:
+     a random id and two random ntfy topics - one the phone subscribes to for
+     notifications, one the app publishes the alert list on. Both are secrets
+     in the same sense an ntfy topic always is, which is why they are random
+     rather than chosen. The owner's copy does not use this at all; it writes
+     to the repo directly with a token instead. */
+  me: 'sa_me',
+  /* Set once the walkthrough has been seen, so it opens itself exactly once
+     - on a copy that was just handed to someone. */
+  guide: 'sa_guide'
 };
 
 var store = {
@@ -3321,9 +3331,14 @@ function openSettings() {
     '</div>' +
     renderQuoteApi() +
     renderAlertsSync() +
+    renderFriendMode() +
+    renderFriendAdmin() +
     '<div class="card">' +
       '<div class="card-h"><span>פעולות</span></div>' +
-      '<button class="btn" onclick="refreshSnapshot()">רענן את המאגר</button>' +
+      '<button class="btn" onclick="openGuide(0)">מדריך</button>' +
+      '<div class="score-note" style="margin:8px 0 14px">איך מחברים מחירים ' +
+        'חיים והתראות, ומה יש בכל לשונית.</div>' +
+      '<button class="btn ghost" onclick="refreshSnapshot()">רענן את המאגר</button>' +
       '<div class="score-note" style="margin:8px 0 14px">מוריד מחדש את ' +
         'נתוני הסריקה האחרונים.</div>' +
       '<button class="btn ghost" onclick="clearCache()">נקה מטמון וטען מחדש</button>' +
@@ -3336,6 +3351,8 @@ function openSettings() {
   // which would otherwise suppress this sheet's card stagger.
   runSheetIntro(true);
   paintSync();
+  paintPublish();
+  loadFriends();
 }
 
 /* Getting the alerts off the phone.
@@ -3422,6 +3439,11 @@ var GH_REPO = 'eladnizri/Stocksapp';
 var GH_PATH = 'data/alerts.json';
 var GH_REPO_API = 'https://api.github.com/repos/' + GH_REPO;
 var GH_API = GH_REPO_API + '/contents/' + GH_PATH;
+var GH_FRIENDS_PATH = 'data/friends.json';
+
+function ghUrl(path) {
+  return GH_REPO_API + '/contents/' + (path || GH_PATH);
+}
 var GH_TOKEN_URL = 'https://github.com/settings/personal-access-tokens/new';
 
 function ghToken() { return store.get(LS.gh, '') || ''; }
@@ -3464,8 +3486,8 @@ function ghError(status) {
   return e;
 }
 
-function ghGet(token) {
-  return fetch(GH_API + '?t=' + Date.now(),
+function ghGet(token, path) {
+  return fetch(ghUrl(path) + '?t=' + Date.now(),
                { headers: ghHeaders(token), cache: 'no-store' })
     .then(function (r) {
       // A missing file is a normal first-run state, not a failure.
@@ -3498,10 +3520,11 @@ function ghVerify(token) {
     });
 }
 
-function ghPut(token, text, sha) {
-  var body = { message: 'Update alerts from the app', content: b64encode(text) };
+function ghPut(token, text, sha, path, msg) {
+  var body = { message: msg || 'Update alerts from the app',
+               content: b64encode(text) };
   if (sha) body.sha = sha;
-  return fetch(GH_API, {
+  return fetch(ghUrl(path), {
     method: 'PUT', headers: ghHeaders(token), body: JSON.stringify(body)
   }).then(function (r) {
     if (!r.ok) throw ghError(r.status);
@@ -3621,9 +3644,565 @@ function pullAlerts() {
   });
 }
 
+/* ------------------------------------------------ sharing with a friend --
+ *
+ * The owner's copy writes the alert list straight into the repo with their
+ * own token. That token cannot be handed out - it can rewrite the whole
+ * project - so a friend needs another way to get their list to the checker.
+ *
+ * They already install ntfy to receive the notifications, and ntfy turns out
+ * to serve as the inbox too: a browser is allowed to publish to a topic, and
+ * an unauthenticated reader can read it back. Measured against the real
+ * service before any of this was built (scripts/probe_ntfy_inbox.py).
+ *
+ * So the friend's app publishes their list to a config topic, and the
+ * checker reads it on its next pass. No server, no account, no token.
+ */
+var NTFY = 'https://ntfy.sh';
+var FRIEND_ALERT_MAX = 40;      // matches the cap in check_alerts.py
+var CODE_PREFIX = 'SA1:';
+
+function randHex(bytes) {
+  var a = new Uint8Array(bytes);
+  crypto.getRandomValues(a);
+  var s = '';
+  for (var i = 0; i < a.length; i++) s += ('0' + a[i].toString(16)).slice(-2);
+  return s;
+}
+
+function myIdentity() {
+  return store.get(LS.me, null);
+}
+
+/* The two topics are generated separately on purpose. Deriving the config
+   topic from the notification one would mean that anyone who learned the
+   topic your phone listens on could also rewrite what you get alerted about. */
+function createIdentity(name) {
+  var me = {
+    id: 'u' + randHex(6),
+    topic: 'sa-' + randHex(12),
+    cfg: 'sa-' + randHex(12) + '-cfg',
+    name: String(name || '').trim().slice(0, 40)
+  };
+  store.set(LS.me, me);
+  return me;
+}
+
+function forgetIdentity() {
+  if (!confirm('לכבות את ההתראות במכשיר הזה? הקוד שנתת יפסיק לעבוד.')) return;
+  try { localStorage.removeItem(LS.me); } catch (e) {}
+  openSettings();
+}
+
+/* What the friend sends the owner, once. Carries the id and both topics, so
+   the owner never has to type any of them. */
+function myCode() {
+  var me = myIdentity();
+  if (!me) return '';
+  return CODE_PREFIX + b64encode(JSON.stringify(
+    { i: me.id, t: me.topic, c: me.cfg, n: me.name }));
+}
+
+function parseCode(raw) {
+  var s = String(raw || '').trim();
+  if (s.indexOf(CODE_PREFIX) !== 0) return null;
+  var o;
+  try { o = JSON.parse(b64decode(s.slice(CODE_PREFIX.length))); }
+  catch (e) { return null; }
+  if (!o || !o.i || !o.t || !o.c) return null;
+  var clean = function (v) {
+    return String(v || '').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 64);
+  };
+  var id = clean(o.i), topic = clean(o.t), cfg = clean(o.c);
+  if (!id || !topic || !cfg) return null;
+  return { id: id, topic: topic, cfg: cfg,
+           name: String(o.n || '').trim().slice(0, 40) };
+}
+
+var PUB = { state: 'none', msg: '' };   // none | sending | ok | err
+
+function paintPublish() {
+  var el = $('#pubNote');
+  if (!el) return;
+  var map = {
+    none: ['', ''],
+    sending: ['שולח…', 'var(--ink-2)'],
+    ok: [PUB.msg || 'נשלח', 'var(--primary-500)'],
+    err: [PUB.msg || 'השליחה נכשלה', 'var(--alert)']
+  };
+  var v = map[PUB.state] || ['', ''];
+  el.textContent = v[0];
+  el.style.color = v[1];
+}
+
+/* The list as the checker will read it. Same shape the owner's file uses, so
+   both paths are validated by exactly the same code on the other end. */
+function myConfigJson() {
+  var base = JSON.parse(alertsSyncJson());
+  var me = myIdentity() || {};
+  return JSON.stringify({
+    v: 1,
+    name: me.name || '',
+    alerts: (base.alerts || []).slice(0, FRIEND_ALERT_MAX),
+    watch: (base.watch || []).slice(0, FRIEND_ALERT_MAX),
+    positions: (base.positions || []).slice(0, FRIEND_ALERT_MAX)
+  });
+}
+
+function publishConfig() {
+  var me = myIdentity();
+  if (!me) return Promise.resolve(false);
+
+  PUB = { state: 'sending' }; paintPublish();
+  return fetch(NTFY, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      topic: me.cfg,
+      title: 'cfg',
+      message: myConfigJson(),
+      // Nothing subscribes to the config topic, but keep it quiet regardless
+      // so a friend who does subscribe by accident is not buzzed by it.
+      priority: 1,
+      tags: ['gear']
+    })
+  }).then(function (r) {
+    if (!r.ok) {
+      // 413 is the one worth naming: it means the list outgrew one message.
+      throw new Error(r.status === 413
+        ? 'הרשימה ארוכה מדי לשליחה אחת'
+        : 'ntfy החזיר שגיאה (' + r.status + ')');
+    }
+    PUB = { state: 'ok', msg: 'עודכן ' + nowHM() }; paintPublish();
+    return true;
+  }).catch(function (e) {
+    PUB = { state: 'err', msg: e.message }; paintPublish();
+    return false;
+  });
+}
+
+var pubTimer = null;
+function queuePublish() {
+  if (!myIdentity()) return;
+  clearTimeout(pubTimer);
+  pubTimer = setTimeout(function () { publishConfig(); }, 1200);
+}
+
+/* ---------------------------------------------- the owner's side of it --
+ *
+ * Registering someone is a deliberate act by the owner, once per person.
+ * The alternative - letting any app copy add itself - would mean a public
+ * write inbox on a public page, and there is no way to tell a friend's
+ * request from anyone else's.
+ */
+function friendsRead(token) {
+  return ghGet(token, GH_FRIENDS_PATH).then(function (cur) {
+    var reg = null;
+    if (cur.text) { try { reg = JSON.parse(cur.text); } catch (e) {} }
+    if (!reg || typeof reg !== 'object') reg = {};
+    if (!reg.users || typeof reg.users !== 'object') reg.users = {};
+    return { sha: cur.sha, reg: reg };
+  });
+}
+
+function friendsWrite(token, reg, sha, msg) {
+  return ghPut(token, JSON.stringify(reg, null, 1) + '\n', sha,
+               GH_FRIENDS_PATH, msg);
+}
+
+function friendNote(msg, colour) {
+  var el = $('#friendNote');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = colour || 'var(--ink-2)';
+}
+
+function addFriend() {
+  var token = ghToken();
+  if (!token) return;
+  var el = $('#friendCode');
+  var who = parseCode(el && el.value);
+  if (!who) {
+    friendNote('הקוד לא תקין — הוא אמור להתחיל ב־' + CODE_PREFIX,
+               'var(--alert)');
+    return;
+  }
+  friendNote('מוסיף…');
+
+  var attempt = function (isRetry) {
+    return friendsRead(token).then(function (cur) {
+      cur.reg.users[who.id] = {
+        topic: who.topic, cfg: who.cfg, name: who.name,
+        // No alerts yet: the checker fills these in the first time this
+        // person's app publishes its list.
+        alerts: [], watch: [], positions: []
+      };
+      return friendsWrite(token, cur.reg, cur.sha,
+                          'Register ' + (who.name || who.id) + ' for alerts');
+    }).then(function () {
+      if (el) el.value = '';
+      friendNote((who.name || 'החבר') + ' נוסף. ההתראות שלו יתחילו לעבוד ' +
+                 'תוך רבע שעה.', 'var(--primary-500)');
+      haptic(12);
+      loadFriends();
+      return true;
+    }).catch(function (e) {
+      if (e.status === 409 && !isRetry) return attempt(true);
+      friendNote(e.message, 'var(--alert)');
+      return false;
+    });
+  };
+  return attempt(false);
+}
+
+function removeFriend(id) {
+  var token = ghToken();
+  if (!token) return;
+  if (!confirm('להסיר את החבר הזה? ההתראות שלו יפסיקו להישלח.')) return;
+  friendNote('מסיר…');
+
+  var attempt = function (isRetry) {
+    return friendsRead(token).then(function (cur) {
+      delete cur.reg.users[id];
+      return friendsWrite(token, cur.reg, cur.sha, 'Remove ' + id);
+    }).then(function () {
+      friendNote('הוסר.', 'var(--ink-2)');
+      loadFriends();
+      return true;
+    }).catch(function (e) {
+      if (e.status === 409 && !isRetry) return attempt(true);
+      friendNote(e.message, 'var(--alert)');
+      return false;
+    });
+  };
+  return attempt(false);
+}
+
+function loadFriends() {
+  var box = $('#friendList');
+  if (!box || !ghToken()) return;
+  friendsRead(ghToken()).then(function (cur) {
+    var ids = Object.keys(cur.reg.users || {});
+    if (!ids.length) {
+      box.innerHTML = '<div class="msg">אף אחד עדיין לא מחובר.</div>';
+      return;
+    }
+    box.innerHTML = ids.map(function (id) {
+      var u = cur.reg.users[id] || {};
+      var n = (u.alerts || []).length;
+      return '<div class="alert">' +
+        '<div><b>' + esc(u.name || id) + '</b>' +
+          '<div class="sub">' + n + ' התראות · ' +
+            ((u.watch || []).length) + ' במעקב</div></div>' +
+        '<button class="icon-btn" onclick="removeFriend(\'' + esc(id) +
+          '\')" aria-label="הסר">' +
+          '<svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>' +
+        '</button></div>';
+    }).join('');
+  }).catch(function (e) {
+    box.innerHTML = '<div class="msg">' + esc(e.message) + '</div>';
+  });
+}
+
+/* ------------------------------------------------------ settings cards -- */
+function renderFriendAdmin() {
+  if (!ghToken()) return '';
+  return '<div class="card">' +
+    '<div class="card-h"><span>חברים מחוברים</span></div>' +
+    '<div class="score-note" style="margin-bottom:11px">מי שקיבל ממך את ' +
+      'האפליקציה שולח לך קוד פעם אחת. אחרי שתוסיף אותו כאן, ההתראות שלו ' +
+      'נשלחות לטלפון שלו בלבד — הוא לא רואה את שלך ואתה לא רואה את שלו.</div>' +
+    '<div id="friendList"><div class="msg">טוען…</div></div>' +
+    '<div class="frow" style="margin-top:12px">' +
+      '<input id="friendCode" placeholder="' + CODE_PREFIX + '…" ' +
+        'autocomplete="off" autocapitalize="off" spellcheck="false">' +
+      '<button class="btn ghost" style="max-width:96px" ' +
+        'onclick="addFriend()">הוסף</button>' +
+    '</div>' +
+    '<div class="score-note" id="friendNote" style="margin-top:8px"></div>' +
+    '</div>';
+}
+
+function renderFriendMode() {
+  // The owner has a token and writes to the repo directly; this whole path
+  // exists for everyone else.
+  if (ghToken()) return '';
+  var me = myIdentity();
+  var head = '<div class="card-h"><span>התראות לטלפון</span>' +
+    '<span class="sub" id="pubNote"></span></div>';
+
+  if (!me) {
+    return '<div class="card">' + head +
+      '<div class="score-note" style="margin-bottom:11px">כרגע ההתראות ' +
+        'נבדקות רק כשהאפליקציה פתוחה. הפעלה כאן תגרום להן להגיע לטלפון ' +
+        'גם כשהיא סגורה — בלי חשבון ובלי הרשמה.</div>' +
+      '<div class="frow">' +
+        '<input id="meName" placeholder="השם שלך" autocomplete="off" ' +
+          'maxlength="40">' +
+        '<button class="btn" style="max-width:110px" ' +
+          'onclick="enableFriendAlerts()">הפעל</button>' +
+      '</div>' +
+      '<div class="score-note" style="margin-top:9px">השם משמש רק כדי שבעל ' +
+        'האפליקציה ידע מי אתה ברשימה שלו.</div>' +
+      '</div>';
+  }
+
+  return '<div class="card">' + head +
+    '<div class="score-note" style="margin-bottom:9px"><b>שלב 1 — התקן את ' +
+      'ntfy</b><br>אפליקציה חינמית שמקבלת את ההתראות. התקן והירשם לנושא:</div>' +
+    '<pre class="sync-box wrap" id="myTopic">' + esc(me.topic) + '</pre>' +
+    '<div class="frow" style="margin-top:9px">' +
+      '<button class="btn ghost" onclick="copyBox(\'myTopic\')">העתק נושא</button>' +
+      '<a class="btn ghost" href="https://ntfy.sh/app" target="_blank" ' +
+        'rel="noopener" style="text-align:center">פתח את ntfy</a>' +
+    '</div>' +
+    '<div class="score-note" style="margin:14px 0 9px"><b>שלב 2 — שלח את ' +
+      'הקוד הזה פעם אחת</b><br>לבעל האפליקציה, בוואטסאפ. רק אחרי שהוא ' +
+      'יוסיף אותך ההתראות יתחילו לעבוד.</div>' +
+    '<pre class="sync-box wrap" id="myCodeBox">' + esc(myCode()) + '</pre>' +
+    '<div class="frow" style="margin-top:9px">' +
+      '<button class="btn" onclick="copyBox(\'myCodeBox\')">העתק קוד</button>' +
+      '<button class="btn ghost" style="max-width:96px" ' +
+        'onclick="publishConfig()">עדכן</button>' +
+    '</div>' +
+    '<div class="score-note" id="copyNote" style="margin-top:8px"></div>' +
+    '<div class="score-note" style="margin-top:11px">הרשימה שלך נשלחת לבד ' +
+      'בכל שינוי. הנושא והקוד הם סוד — מי שמכיר אותם יכול לשלוח לך ' +
+      'התראות.</div>' +
+    '<button class="btn ghost" style="margin-top:12px" ' +
+      'onclick="forgetIdentity()">כבה התראות</button>' +
+    '</div>';
+}
+
+function enableFriendAlerts() {
+  var el = $('#meName');
+  var name = (el && el.value || '').trim();
+  if (!name) {
+    var n = $('#pubNote');
+    if (n) { n.textContent = 'צריך שם'; n.style.color = 'var(--alert)'; }
+    return;
+  }
+  createIdentity(name);
+  haptic(12);
+  publishConfig();
+  openSettings();
+}
+
+/* Selects the box's text and copies it where the browser allows. Selection
+   alone is the fallback that always works, including in an installed PWA
+   where the clipboard API is often unavailable. */
+function copyBox(id) {
+  var el = $('#' + id);
+  var note = $('#copyNote');
+  if (!el) return;
+  var text = el.textContent;
+  var done = function (msg, colour) {
+    if (note) { note.textContent = msg; note.style.color = colour; }
+  };
+  try {
+    var r = document.createRange();
+    r.selectNodeContents(el);
+    var sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+  } catch (e) {}
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () {
+      done('הועתק.', 'var(--primary-500)');
+      haptic(10);
+    }).catch(function () {
+      done('סומן — לחץ ארוך והעתק.', 'var(--watch)');
+    });
+    return;
+  }
+  done('סומן — לחץ ארוך והעתק.', 'var(--watch)');
+}
+
+/* ------------------------------------------------------------- the guide --
+ *
+ * Written for someone who was handed a link and knows nothing about any of
+ * this. It is a walkthrough rather than a page of text: each step reports
+ * whether it is actually done, checked live, so nobody has to guess whether
+ * they got it right. Every step past the first is skippable - the app is
+ * fully usable with none of them.
+ */
+var GUIDE_LAST = 3;
+
+function guideBadge(ok, yes, no) {
+  return '<span class="sub" style="color:' +
+    (ok ? 'var(--primary-500)' : 'var(--muted)') + '">' +
+    (ok ? '✓ ' + yes : no) + '</span>';
+}
+
+function guideStep(n) {
+  var src = quoteSource();
+  var hasPrices = src.kind === 'worker' || src.kind === 'finnhub';
+  var me = myIdentity();
+  var owner = !!ghToken();
+
+  if (n === 0) {
+    return {
+      title: 'ברוך הבא',
+      badge: '',
+      body:
+        '<div class="score-note">האפליקציה עוקבת אחרי מניות: רשימת מעקב, ' +
+          'ניתוח לכל מניה, סורק שמסנן לפי תנאים גרפיים, ויומן עסקאות.</div>' +
+        '<div class="score-note" style="margin-top:10px">הכל נשמר ' +
+          '<b>במכשיר שלך בלבד</b>. אף אחד אחר לא רואה את הרשימות שלך, וגם ' +
+          'לא צריך חשבון או הרשמה.</div>' +
+        '<div class="score-note" style="margin-top:10px">שני השלבים הבאים ' +
+          'הם תוספות. אפשר לדלג עליהם ולהתחיל להשתמש עכשיו.</div>'
+    };
+  }
+
+  if (n === 1) {
+    return {
+      title: 'מחירים חיים',
+      badge: guideBadge(hasPrices, 'מחובר', 'לא חובה'),
+      body:
+        '<div class="score-note" style="margin-bottom:11px">בלי זה המחירים ' +
+          'מגיעים מהסריקה בשרת ומתעדכנים כל רבע שעה. מפתח חינמי מ־Finnhub ' +
+          'הופך אותם לחיים. לוקח שתי דקות.</div>' +
+        '<div class="score-note" style="margin-bottom:9px"><b>1.</b> היכנס ' +
+          'ל־finnhub.io והירשם עם מייל. <b>2.</b> העתק את המפתח מהדף ' +
+          'הראשי. <b>3.</b> הדבק כאן:</div>' +
+        '<input id="apiUrl" placeholder="מפתח Finnhub" autocomplete="off" ' +
+          'autocapitalize="off" spellcheck="false" value="' +
+          esc(store.get(LS.api, '') || '') + '">' +
+        '<div class="frow" style="margin-top:9px">' +
+          '<button class="btn" onclick="saveQuoteApi()">שמור ובדוק</button>' +
+          '<a class="btn ghost" href="https://finnhub.io/register" ' +
+            'target="_blank" rel="noopener" style="text-align:center">' +
+            'הרשמה</a>' +
+        '</div>' +
+        '<div class="score-note" id="apiNote" style="margin-top:9px"></div>'
+    };
+  }
+
+  if (n === 2) {
+    if (owner) {
+      return {
+        title: 'התראות',
+        badge: guideBadge(true, 'מחובר', ''),
+        body: '<div class="score-note">ההתראות שלך כבר מחוברות דרך הטוקן ' +
+          'של GitHub. כדי לחבר מישהו אחר — הגדרות ← חברים מחוברים.</div>'
+      };
+    }
+    if (!me) {
+      return {
+        title: 'התראות לטלפון',
+        badge: guideBadge(false, '', 'לא חובה'),
+        body:
+          '<div class="score-note" style="margin-bottom:11px">בלי זה ' +
+            'ההתראות נבדקות רק כשהאפליקציה פתוחה. עם זה הן מגיעות לטלפון ' +
+            'גם כשהיא סגורה — בלי חשבון ובלי הרשמה.</div>' +
+          '<div class="frow">' +
+            '<input id="meName" placeholder="השם שלך" maxlength="40" ' +
+              'autocomplete="off">' +
+            '<button class="btn" style="max-width:110px" ' +
+              'onclick="enableFriendAlerts()">הפעל</button>' +
+          '</div>' +
+          '<div class="score-note" id="pubNote" style="margin-top:9px"></div>'
+      };
+    }
+    return {
+      title: 'התראות לטלפון',
+      badge: guideBadge(true, 'מופעל', ''),
+      body:
+        '<div class="score-note" style="margin-bottom:9px"><b>שלב א׳</b> — ' +
+          'התקן את האפליקציה <b>ntfy</b> בטלפון (חינם), ובתוכה הוסף את ' +
+          'הנושא הזה:</div>' +
+        '<pre class="sync-box wrap" id="gTopic">' + esc(me.topic) + '</pre>' +
+        '<div class="frow" style="margin-top:9px">' +
+          '<button class="btn ghost" onclick="copyBox(\'gTopic\')">העתק</button>' +
+          '<a class="btn ghost" href="https://ntfy.sh/app" target="_blank" ' +
+            'rel="noopener" style="text-align:center">פתח ntfy</a>' +
+        '</div>' +
+        '<div class="score-note" style="margin:13px 0 9px"><b>שלב ב׳</b> — ' +
+          'שלח את הקוד הזה פעם אחת למי שנתן לך את האפליקציה. עד שהוא ' +
+          'יוסיף אותך, ההתראות עוד לא ירוצו:</div>' +
+        '<pre class="sync-box wrap" id="gCode">' + esc(myCode()) + '</pre>' +
+        '<div class="frow" style="margin-top:9px">' +
+          '<button class="btn" onclick="copyBox(\'gCode\')">העתק קוד</button>' +
+        '</div>' +
+        '<div class="score-note" id="copyNote" style="margin-top:8px"></div>'
+    };
+  }
+
+  return {
+    title: 'זהו, אפשר להתחיל',
+    badge: '',
+    body:
+      '<div class="score-note"><b>בית</b> — מצב השוק והעסקאות הפתוחות.</div>' +
+      '<div class="score-note" style="margin-top:8px"><b>שוק</b> — חיפוש ' +
+        'וניתוח של מניה, השוואה, דוחות קרובים.</div>' +
+      '<div class="score-note" style="margin-top:8px"><b>מעקב</b> — רשימת ' +
+        'המעקב, ההתראות, והסורק שמסנן מניות לפי תנאים גרפיים.</div>' +
+      '<div class="score-note" style="margin-top:8px"><b>עסקאות</b> — ' +
+        'פתיחת סטאפ, חישוב כמות לפי סיכון, ויומן.</div>' +
+      '<div class="score-note" style="margin-top:11px">אפשר לפתוח את ' +
+        'המדריך שוב מתי שרוצים: גלגל השיניים ← מדריך.</div>'
+  };
+}
+
+function openGuide(n) {
+  n = Math.max(0, Math.min(GUIDE_LAST, n || 0));
+  store.set(LS.guide, true);
+  CUR = null;
+  var st = guideStep(n);
+
+  var dots = '';
+  for (var i = 0; i <= GUIDE_LAST; i++) {
+    dots += '<i style="display:inline-block;width:7px;height:7px;' +
+      'border-radius:99px;margin-inline-end:5px;background:' +
+      (i === n ? 'var(--primary-500)' : 'var(--border)') + '"></i>';
+  }
+
+  $('#sheetBody').innerHTML =
+    '<div class="card">' +
+      '<div class="card-h"><span>' + esc(st.title) + '</span>' +
+        (st.badge || '') +
+        '<button class="icon-btn" onclick="closeSheet()" aria-label="סגור">' +
+        '<svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>' +
+        '</button></div>' +
+      '<div style="margin-bottom:12px">' + dots + '</div>' +
+      st.body +
+      '<div class="frow" style="margin-top:15px">' +
+        (n < GUIDE_LAST
+          ? '<button class="btn" onclick="openGuide(' + (n + 1) + ')">' +
+              (n === 0 ? 'קדימה' : 'הבא') + '</button>'
+          : '<button class="btn" onclick="closeSheet()">סיום</button>') +
+        (n > 0
+          ? '<button class="btn ghost" style="max-width:86px" ' +
+            'onclick="openGuide(' + (n - 1) + ')">חזור</button>'
+          : '') +
+      '</div>' +
+    '</div>';
+
+  openSheet();
+  $('.modal-sheet').scrollTop = 0;
+  runSheetIntro(true);
+  paintPublish();
+}
+
+/* Someone who was handed a link and opened it for the first time gets the
+   walkthrough without having to find it. Anyone with any data at all - a
+   watchlist, a token, a key - has used this before and is left alone. */
+function maybeFirstRun() {
+  if (store.get(LS.guide, false)) return;
+  var used = store.get(LS.alerts, []).length || watchlist().length ||
+             store.get(LS.trades, []).length || (store.get(LS.api, '') || '') ||
+             ghToken() || myIdentity();
+  if (used) { store.set(LS.guide, true); return; }
+  setTimeout(function () { openGuide(0); }, 700);
+}
+
 /* Adding three alerts in a row should be one commit, not three. */
 var syncTimer = null;
 function queueSync() {
+  // A friend holds no token; their list travels over ntfy instead. Hooked
+  // here rather than at each call site so the two paths can never drift.
+  queuePublish();
   if (!ghToken()) return;
   // Marked before the debounce, so a copy closed mid-wait still knows on the
   // next open that it holds a change GitHub has not seen.
@@ -4101,6 +4680,7 @@ function boot() {
     if (store.get(LS.dirty, false)) syncAlerts();
     else pullAlerts();
   }
+  maybeFirstRun();
 }
 
 if (document.readyState === 'loading') {
