@@ -12,6 +12,7 @@ on:
       - 'scripts/probe_sector.py'
       - 'scripts/probe_analyst.py'
       - 'scripts/probe_universe.py'
+      - 'scripts/probe_ntfy_inbox.py'
       - '.github/workflows/probe.yml'
 
 jobs:
@@ -43,3 +44,10 @@ jobs:
       - name: Probe a wider stock universe
         if: always()
         run: python scripts/probe_universe.py
+
+      # Could ntfy - already installed by everyone who wants alerts - also
+      # carry a friend's alert list to the runner, so that sharing the app
+      # needs no server, no token and nobody in the middle?
+      - name: Probe ntfy as an inbox
+        if: always()
+        run: python scripts/probe_ntfy_inbox.py
