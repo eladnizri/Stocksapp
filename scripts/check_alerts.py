@@ -31,6 +31,21 @@ ALERTS = os.path.join(DATA, "alerts.json")
 STATE = os.path.join(DATA, "alert_state.json")
 TICKERS = os.path.join(DATA, "tickers.json")
 
+# Everyone else the app has been shared with. Deliberately a separate file
+# from alerts.json: the phone writes alerts.json wholesale from its own
+# localStorage, so anything of anyone else's kept in there would be dropped
+# the next time the owner added an alert. Only this script writes this file.
+FRIENDS = os.path.join(DATA, "friends.json")
+
+# A friend's app publishes their list to their own ntfy topic and this reads
+# it back - so sharing the app needs no server, no account and no token in
+# anyone's hands. Measured against the real service (scripts/probe_ntfy_inbox.py):
+# ntfy allows the browser's publish (Access-Control-Allow-Origin: *), returns
+# the message to an unauthenticated reader, and rejects a body over ~8KB.
+FRIEND_MAX = 20          # people; a cap so a stray topic cannot grow the file
+FRIEND_ALERT_MAX = 40    # alerts each, well inside ntfy's message size limit
+FRIEND_CFG_VERSION = 1
+
 # build_tickers.py runs immediately before this in the same job and has
 # already priced every watched symbol. Reusing that instead of asking Nasdaq
 # again halves the requests and, more importantly, means the number an alert
@@ -200,6 +215,88 @@ def positions(raw):
     return out
 
 
+def safe_id(raw):
+    """A user id that cannot break the state file's key format.
+
+    State keys are pipe-separated, so an id carrying a pipe would silently
+    split into the wrong fields and let one person's key collide with
+    another's.
+    """
+    return "".join(c for c in str(raw or "") if c.isalnum() or c in "-_")[:32]
+
+
+def load_users(raw, friends_raw, owner_topic):
+    """One entry per person: the owner, then anyone the app was shared with.
+
+    The owner is not a special case of a friend - their alerts come from
+    alerts.json, which their phone owns, and their topic is the secret that
+    never touches the repo. Friends come from friends.json, which only this
+    script writes, and each carries their own topic.
+    """
+    users = [{
+        "id": "",
+        "owner": True,
+        "name": "",
+        "topic": owner_topic,
+        "alerts": normalise(raw),
+        "watch": watch_list(raw),
+        "positions": positions(raw),
+    }]
+
+    reg = (friends_raw.get("users") or {}) if isinstance(friends_raw, dict) else {}
+    if not isinstance(reg, dict):
+        return users
+    for uid in sorted(reg)[:FRIEND_MAX]:
+        u = reg[uid]
+        if not isinstance(u, dict):
+            continue
+        uid = safe_id(uid)
+        topic = str(u.get("topic") or "").strip()
+        # No topic means nowhere to deliver, which would make every check for
+        # this person a silent no-op. Drop them rather than pretend.
+        if not uid or not topic:
+            continue
+        users.append({
+            "id": uid,
+            "owner": False,
+            "name": str(u.get("name") or "").strip()[:40],
+            "topic": topic,
+            "alerts": normalise(u)[:FRIEND_ALERT_MAX],
+            "watch": watch_list(u)[:FRIEND_ALERT_MAX],
+            "positions": positions(u)[:FRIEND_ALERT_MAX],
+        })
+    return users
+
+
+def user_key(user, base):
+    """Namespace a state key to the person it belongs to.
+
+    The owner's keys are deliberately left exactly as they were before this
+    file knew about anyone else. Prefixing them would make every currently
+    armed alert look new, and the first run after deploying would re-send all
+    of them at once.
+    """
+    return base if user.get("owner") else f"u:{user['id']}|{base}"
+
+
+def state_key(user, alert):
+    return user_key(user, alert_key(alert))
+
+
+def bare_key(key):
+    """A state key without its user namespace, for classifying its kind."""
+    if key.startswith("u:") and "|" in key:
+        return key.split("|", 1)[1]
+    return key
+
+
+def key_user(key):
+    """Which user a state key belongs to; '' for the owner."""
+    if key.startswith("u:") and "|" in key:
+        return key[2:].split("|", 1)[0]
+    return ""
+
+
 def prebuilt_quotes():
     """{symbol: (price, pct)} from data/tickers.json, if it is fresh enough."""
     raw = load_json(TICKERS, {})
@@ -272,23 +369,25 @@ def israel_now():
         return dt.datetime.now(dt.timezone(dt.timedelta(hours=3)))
 
 
-def report_key(when=None):
-    return f"report|{(when or israel_now()).date().isoformat()}"
+def report_key(user=None, when=None):
+    base = f"report|{(when or israel_now()).date().isoformat()}"
+    return user_key(user, base) if user else base
 
 
-def report_due(state, dry_run):
-    """True inside the 17:00 hour, once a day.
+def report_due(state, user, dry_run):
+    """True inside the 17:00 hour, once a day, per person.
 
     The checker runs every fifteen minutes, so this fires on whichever run
     lands first in that hour and then stays quiet - the state key is the day,
-    not the run.
+    not the run. Keyed per user as well, so one person's report going out
+    does not count as everyone's.
     """
     now = israel_now()
     if now.hour != REPORT_HOUR:
         return False
     if dry_run:
         return True
-    return report_key(now) not in state
+    return report_key(user, now) not in state
 
 
 EARNINGS_WINDOW = 2   # days out; 0/1/2 all count as "coming up"
@@ -419,6 +518,91 @@ def notify(topic, title, message, tags, dry_run):
         return False
 
 
+def read_published_config(sess, cfg_topic):
+    """The newest alert list a friend's app published to their config topic.
+
+    Returns None when there is nothing to read - which is the normal state,
+    not a failure: ntfy.sh keeps messages for about twelve hours, so a friend
+    who has not opened the app today publishes nothing and the copy already
+    stored keeps working. That is the whole reason the config is persisted
+    here instead of being read live on every check.
+    """
+    url = f"{ntfy_host()}/{cfg_topic}/json?poll=1&since=all"
+    try:
+        r = sess.get(url, timeout=20)
+    except Exception as e:
+        log(f"    could not reach ntfy for a config topic: {type(e).__name__}")
+        return None
+    if r.status_code != 200:
+        log(f"    config topic returned HTTP {r.status_code}")
+        return None
+
+    newest = None
+    for line in r.text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except Exception:
+            continue
+        if msg.get("event") != "message":
+            continue
+        try:
+            cfg = json.loads(msg.get("message") or "")
+        except Exception:
+            continue
+        if not isinstance(cfg, dict) or cfg.get("v") != FRIEND_CFG_VERSION:
+            continue
+        # Messages come back oldest first, so the last valid one wins.
+        newest = cfg
+    return newest
+
+
+def refresh_friends(sess, friends_raw):
+    """Pull each friend's latest published list into the stored registry.
+
+    Anyone who knows a config topic can publish to it, so nothing that
+    arrives here is trusted as-is: it is put through the same normalise /
+    watch_list / positions filters the owner's own file goes through, and
+    capped, before it can become something this script acts on.
+    """
+    reg = (friends_raw.get("users") or {}) if isinstance(friends_raw, dict) else {}
+    if not isinstance(reg, dict) or not reg:
+        return friends_raw, False
+
+    changed = False
+    for uid in sorted(reg)[:FRIEND_MAX]:
+        u = reg[uid]
+        if not isinstance(u, dict):
+            continue
+        cfg_topic = str(u.get("cfg") or "").strip()
+        if not cfg_topic:
+            continue
+        cfg = read_published_config(sess, cfg_topic)
+        if not cfg:
+            continue
+
+        fresh = {
+            "alerts": [dict(a) for a in normalise(cfg)][:FRIEND_ALERT_MAX],
+            "watch": watch_list(cfg)[:FRIEND_ALERT_MAX],
+            "positions": positions(cfg)[:FRIEND_ALERT_MAX],
+        }
+        name = str(cfg.get("name") or "").strip()[:40]
+        if name:
+            fresh["name"] = name
+
+        if all(u.get(k) == v for k, v in fresh.items()):
+            continue
+        u.update(fresh)
+        u["at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        changed = True
+        who = u.get("name") or uid
+        log(f"    {who}: picked up {len(fresh['alerts'])} alert(s), "
+            f"{len(fresh['watch'])} watched")
+    return friends_raw, changed
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
@@ -461,33 +645,48 @@ def main():
             "docs/alerts.md.")
         return 1
 
+    sess = session()
+
+    # Anyone the app was shared with publishes their list to their own ntfy
+    # topic; this reads it in before deciding what to check. Done first so a
+    # list changed on someone's phone five minutes ago is acted on now.
+    friends_raw = load_json(FRIENDS, {})
+    if not isinstance(friends_raw, dict):
+        friends_raw = {}
+    friends_raw, friends_changed = refresh_friends(sess, friends_raw)
+
     raw = load_json(ALERTS, {})
-    alerts = normalise(raw)
-    watched = watch_list(raw)
-    open_pos = positions(raw)
-    if not alerts and not watched and not open_pos:
+    users = load_users(raw, friends_raw, topic)
+
+    for u in users:
+        who = "you" if u["owner"] else (u["name"] or u["id"])
+        log(f"{who}: {len(u['alerts'])} alert(s), {len(u['watch'])} watched, "
+            f"{len(u['positions'])} position(s)")
+
+    if not any(u["alerts"] or u["watch"] or u["positions"] for u in users):
         log("Nothing defined - no alerts, no watchlist, no positions.")
-        return 0
-    log(f"{len(alerts)} alert(s), {len(watched)} watched, "
-        f"{len(open_pos)} position(s)")
+        return save_friends(friends_raw, friends_changed, args.dry_run)
 
     state = load_json(STATE, {})
     if not isinstance(state, dict):
         state = {}
 
-    sess = session()
     # Prices come from the file build_tickers.py just wrote wherever possible,
     # so the number an alert fires on is the number the app is showing.
     prebuilt = prebuilt_quotes()
     if prebuilt:
         log(f"    reusing {len(prebuilt)} quote(s) from tickers.json")
 
+    # One price map for everyone. Fetching per person would multiply the
+    # requests by the number of people sharing the app for no new information.
+    need = {"SPY", "QQQ"}                      # the report always names these
+    for u in users:
+        need |= {a["s"] for a in u["alerts"]}
+        need |= set(u["watch"])
+        need |= {p["s"] for p in u["positions"]}
+
     prices, sources, pcts = {}, {}, {}
-    need = sorted({a["s"] for a in alerts}
-                  | set(watched)
-                  | {p["s"] for p in open_pos}
-                  | {"SPY", "QQQ"})          # the report always names these
-    for sym in need:
+    for sym in sorted(need):
         if sym in prebuilt:
             prices[sym], pcts[sym] = prebuilt[sym]
             sources[sym] = "live"
@@ -503,137 +702,166 @@ def main():
         log(f"    note: {len(stale)} symbol(s) fell back to the last daily "
             f"close, which lags during a session: {', '.join(stale)}")
 
+    # The calendar is keyed by day, not by symbol, so one lookup covers
+    # everybody's symbols at once.
+    er_syms = set()
+    for u in users:
+        er_syms |= {a["s"] for a in u["alerts"]} | set(u["watch"])
+        er_syms |= {p["s"] for p in u["positions"]}
+    calendar = earnings_calendar(sess, er_syms)
+
     now = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    live_keys = {alert_key(a) for a in alerts}
+    today = dt.date.today().isoformat()
     changed = False
     sent = 0
     failed = 0
 
-    for a in alerts:
-        key = alert_key(a)
-        price = prices.get(a["s"])
-        if price is None:
-            continue
+    for user in users:
+        held = {p["s"] for p in user["positions"]}
 
-        if key in state:
-            if rearmed(a, price):
-                del state[key]
+        # --- price alerts -------------------------------------------------
+        for a in user["alerts"]:
+            key = state_key(user, a)
+            price = prices.get(a["s"])
+            if price is None:
+                continue
+
+            if key in state:
+                if rearmed(a, price):
+                    del state[key]
+                    changed = True
+                    log(f"    {a['s']} re-armed at {price}")
+                continue
+
+            if not fired(a, price):
+                continue
+
+            word = "עלתה מעל" if a["d"] == "above" else "ירדה מתחת ל־"
+            tag = ("chart_with_upwards_trend" if a["d"] == "above"
+                   else "chart_with_downwards_trend")
+            note = ""
+            if sources.get(a["s"]) == "close":
+                note = "\n(מחיר סגירה אחרון — לא ציטוט חי)"
+            ok = notify(
+                user["topic"],
+                f"{a['s']} {a['p']:g}$",
+                f"{a['s']} {word} ${a['p']:g}\nכעת ${price:,.2f}{note}",
+                [tag],
+                args.dry_run,
+            )
+            if ok:
+                sent += 1
+                state[key] = {"fired": now, "price": price}
                 changed = True
-                log(f"    {a['s']} re-armed at {price}")
-            continue
+                log(f"    FIRED {a['s']} {a['d']} {a['p']} at {price}")
+            else:
+                # Deliberately not recorded as fired, so the next run tries
+                # again rather than treating an undelivered alert as delivered.
+                failed += 1
 
-        if not fired(a, price):
-            continue
+        # --- a big day, for anything on the watchlist ----------------------
+        for sym in user["watch"]:
+            pct = pcts.get(sym)
+            price = prices.get(sym)
+            if pct is None or price is None:
+                continue
+            if abs(pct) < MOVE_PCT:
+                continue
+            # Keyed by the day, so one move is one notification however many
+            # times the checker runs while the stock stays up there.
+            key = user_key(user, f"move|{sym}|{today}")
+            if key in state:
+                continue
+            up = pct >= 0
+            ok = notify(
+                user["topic"],
+                f"{sym} {pct:+.1f}%",
+                f"{sym} {'זינקה' if up else 'צנחה'} {abs(pct):.1f}% היום\n"
+                f"כעת ${price:,.2f}",
+                ["chart_with_upwards_trend" if up
+                 else "chart_with_downwards_trend"],
+                args.dry_run,
+            )
+            if ok:
+                sent += 1
+                state[key] = {"fired": now, "pct": pct}
+                changed = True
+                log(f"    MOVED {sym} {pct:+.2f}%")
+            else:
+                failed += 1
 
-        word = "עלתה מעל" if a["d"] == "above" else "ירדה מתחת ל־"
-        tag = ("chart_with_upwards_trend" if a["d"] == "above"
-               else "chart_with_downwards_trend")
-        note = ""
-        if sources.get(a["s"]) == "close":
-            note = "\n(מחיר סגירה אחרון — לא ציטוט חי)"
-        ok = notify(
-            topic,
-            f"{a['s']} {a['p']:g}$",
-            f"{a['s']} {word} ${a['p']:g}\nכעת ${price:,.2f}{note}",
-            [tag],
-            args.dry_run,
-        )
-        if ok:
-            sent += 1
-            state[key] = {"fired": now, "price": price}
+        # --- earnings coming up, for anything held or watched --------------
+        mine = ({a["s"] for a in user["alerts"]} | set(user["watch"]) | held)
+        for sym, er in calendar.items():
+            if sym not in mine:
+                continue
+            # Keyed by the report date itself, not by how many days out it is,
+            # so this fires exactly once per report - whichever run first sees
+            # it inside the window - rather than once a day as it counts down.
+            key = user_key(user, f"earnings|{sym}|{er['d']}")
+            if key in state:
+                continue
+            when_word = earnings_when(er["d"])
+            session_word = {"pre": " (לפני הפתיחה)",
+                            "post": " (אחרי הנעילה)"}.get(er.get("t"), "")
+            eps_line = f"\nתחזית EPS: {er['eps']}" if er.get("eps") else ""
+            ok = notify(
+                user["topic"],
+                f"{sym} מדווחת {when_word}",
+                f"{sym} מדווחת רבעון {when_word}{session_word}\n"
+                f"{'יש לך פוזיציה פתוחה' if sym in held else 'ברשימת המעקב שלך'}"
+                f"{eps_line}",
+                ["loudspeaker"],
+                args.dry_run,
+            )
+            if ok:
+                sent += 1
+                state[key] = {"fired": now, "d": er["d"]}
+                changed = True
+                log(f"    EARNINGS {sym} on {er['d']}")
+            else:
+                failed += 1
+
+        # --- the daily report ----------------------------------------------
+        if report_due(state, user, args.dry_run):
+            title, body = report_text(user["positions"], prices, pcts)
+            if notify(user["topic"], title, body, ["bar_chart"], args.dry_run):
+                sent += 1
+                state[report_key(user)] = {"sent": now}
+                changed = True
+                log("    daily report sent")
+            else:
+                failed += 1
+
+    # --- pruning ------------------------------------------------------------
+    # Everything below is per person. Doing it globally would let one person's
+    # deletion clear another person's armed alert, which is the same class of
+    # bug as sharing a state key.
+    known = {u["id"] for u in users}
+    live = {u["id"]: {alert_key(a) for a in u["alerts"]} for u in users}
+
+    for key in list(state):
+        uid = key_user(key)
+        bare = bare_key(key)
+        dated = bare.startswith(("move|", "report|", "earnings|"))
+        # A person who is no longer registered leaves nothing behind.
+        if uid not in known:
+            del state[key]
             changed = True
-            log(f"    FIRED {a['s']} {a['d']} {a['p']} at {price}")
-        else:
-            # Deliberately not recorded as fired, so the next run tries again
-            # rather than treating an undelivered alert as delivered.
-            failed += 1
-
-    # --- a big day, for anything on the watchlist -------------------------
-    today = dt.date.today().isoformat()
-    for sym in watched:
-        pct = pcts.get(sym)
-        price = prices.get(sym)
-        if pct is None or price is None:
             continue
-        if abs(pct) < MOVE_PCT:
-            continue
-        # Keyed by the day, so one move is one notification however many times
-        # the checker runs afterwards while the stock stays up there.
-        key = f"move|{sym}|{today}"
-        if key in state:
-            continue
-        up = pct >= 0
-        ok = notify(
-            topic,
-            f"{sym} {pct:+.1f}%",
-            f"{sym} {'זינקה' if up else 'צנחה'} {abs(pct):.1f}% היום\n"
-            f"כעת ${price:,.2f}",
-            ["chart_with_upwards_trend" if up else "chart_with_downwards_trend"],
-            args.dry_run,
-        )
-        if ok:
-            sent += 1
-            state[key] = {"fired": now, "pct": pct}
+        # An alert deleted from someone's list should not leave its state.
+        # Only alert keys are pruned this way: the move, report and earnings
+        # keys are dated, not tied to any alert, and wiping them would re-send
+        # today's notifications on the next run.
+        if not dated and "|" in bare and bare not in live.get(uid, set()):
+            del state[key]
             changed = True
-            log(f"    MOVED {sym} {pct:+.2f}%")
-        else:
-            failed += 1
-
-    # --- earnings coming up, for anything held or watched -----------------
-    er_syms = {a["s"] for a in alerts} | set(watched) | {p["s"] for p in open_pos}
-    for sym, er in earnings_calendar(sess, er_syms).items():
-        # Keyed by the report date itself, not by how many days out it is, so
-        # this fires exactly once per report - whichever run first sees it
-        # inside the window - rather than once a day as it counts down.
-        key = f"earnings|{sym}|{er['d']}"
-        if key in state:
-            continue
-        when_word = earnings_when(er["d"])
-        session_word = {"pre": " (לפני הפתיחה)", "post": " (אחרי הנעילה)"}.get(er.get("t"), "")
-        eps_line = f"\nתחזית EPS: {er['eps']}" if er.get("eps") else ""
-        held = sym in {p["s"] for p in open_pos}
-        ok = notify(
-            topic,
-            f"{sym} מדווחת {when_word}",
-            f"{sym} מדווחת רבעון {when_word}{session_word}\n"
-            f"{'יש לך פוזיציה פתוחה' if held else 'ברשימת המעקב שלך'}{eps_line}",
-            ["loudspeaker"],
-            args.dry_run,
-        )
-        if ok:
-            sent += 1
-            state[key] = {"fired": now, "d": er["d"]}
-            changed = True
-            log(f"    EARNINGS {sym} on {er['d']}")
-        else:
-            failed += 1
-
-    # --- the daily report -------------------------------------------------
-    if report_due(state, args.dry_run):
-        title, body = report_text(open_pos, prices, pcts)
-        if notify(topic, title, body, ["bar_chart"], args.dry_run):
-            sent += 1
-            state[report_key()] = {"sent": now}
-            changed = True
-            log("    daily report sent")
-        else:
-            failed += 1
-
-    # An alert deleted from alerts.json should not leave its state behind.
-    # Only alert keys are pruned: the move, report and earnings keys are
-    # dated, not tied to any alert, and wiping them would re-send today's
-    # notifications on the next run.
-    for key in [k for k in state
-                if "|" in k and not k.startswith(("move|", "report|", "earnings|"))
-                and k not in live_keys]:
-        del state[key]
-        changed = True
 
     # Dated keys are pruned by age instead, so the file cannot grow forever.
     cutoff = (dt.date.today() - dt.timedelta(days=7)).isoformat()
     for key in [k for k in state
-                if k.startswith(("move|", "report|", "earnings|"))
-                and k.rsplit("|", 1)[-1] < cutoff]:
+                if bare_key(k).startswith(("move|", "report|", "earnings|"))
+                and bare_key(k).rsplit("|", 1)[-1] < cutoff]:
         del state[key]
         changed = True
 
@@ -645,17 +873,33 @@ def main():
         log("    state updated")
 
     log(f"Done. {sent} notification(s) sent, {len(state)} alert(s) armed.")
-    # Signals to the workflow whether there is anything to commit.
-    gh_out = os.environ.get("GITHUB_OUTPUT")
-    if gh_out:
-        with open(gh_out, "a") as fh:
-            fh.write(f"changed={'true' if changed else 'false'}\n")
 
+    rc = save_friends(friends_raw, friends_changed, args.dry_run,
+                      also_changed=changed)
     if failed:
         # A green run that quietly delivered nothing is the worst outcome
         # here: the alert looks handled and never arrives. Fail loudly.
         log(f"ERROR: {failed} notification(s) could not be delivered.")
         return 1
+    return rc
+
+
+def save_friends(friends_raw, friends_changed, dry_run, also_changed=False):
+    """Persist the friends registry and tell the workflow whether to commit."""
+    if friends_changed and not dry_run:
+        os.makedirs(DATA, exist_ok=True)
+        with open(FRIENDS, "w") as fh:
+            json.dump(friends_raw, fh, indent=1, sort_keys=True,
+                      ensure_ascii=False)
+            fh.write("\n")
+        log("    friends updated")
+
+    # Signals to the workflow whether there is anything to commit.
+    gh_out = os.environ.get("GITHUB_OUTPUT")
+    if gh_out:
+        with open(gh_out, "a") as fh:
+            fh.write(
+                f"changed={'true' if (friends_changed or also_changed) else 'false'}\n")
     return 0
 
 
