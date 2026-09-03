@@ -1060,3 +1060,22 @@ a.btn { display: block; text-decoration: none; }
 .tr-part b { font-variant-numeric: tabular-nums; }
 .tr-part b.up { color: var(--gain); }
 .tr-part b.down { color: var(--loss); }
+
+/* ---------------------------------------------------------------- desktop */
+/* Everything above is mobile-first and untouched. On a screen wide AND tall
+   enough that it can't be a phone (a landscape phone is wide but short, so
+   the height clause excludes it), the shell used to stretch its 100vh/100dvh
+   height across the whole browser window, stranding the tab bar far below
+   short content. Capping the height and centering the shell like a phone-
+   sized card fixes that without changing a single mobile rule. */
+@media (min-width: 700px) and (min-height: 700px) {
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .app {
+    height: min(100dvh, 900px);
+    box-shadow: var(--shadow);
+  }
+}
