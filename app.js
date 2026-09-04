@@ -3662,6 +3662,23 @@ var NTFY = 'https://ntfy.sh';
 var FRIEND_ALERT_MAX = 40;      // matches the cap in check_alerts.py
 var CODE_PREFIX = 'SA1:';
 
+/* Sends someone straight to the right store instead of a generic download
+   page they then have to search from. The iOS id is the one piece of this
+   not verified against the real store - Apple assigns it arbitrarily, so a
+   wrong digit points at a different app entirely rather than failing loudly.
+   If this ever needs correcting, it is the only line that has to change. */
+var NTFY_IOS_URL = 'https://apps.apple.com/app/ntfy/id1625396347';
+var NTFY_ANDROID_URL =
+  'https://play.google.com/store/apps/details?id=io.heckel.ntfy';
+
+function ntfyInstallUrl() {
+  var ua = navigator.userAgent || '';
+  if (/iPhone|iPad|iPod/.test(ua)) return NTFY_IOS_URL;
+  if (/Android/.test(ua)) return NTFY_ANDROID_URL;
+  // Desktop or anything unrecognised: the web app needs no install at all.
+  return NTFY + '/app';
+}
+
 function randHex(bytes) {
   var a = new Uint8Array(bytes);
   crypto.getRandomValues(a);
@@ -3949,12 +3966,13 @@ function renderFriendMode() {
 
   return '<div class="card">' + head +
     '<div class="score-note" style="margin-bottom:9px"><b>שלב 1 — התקן את ' +
-      'ntfy</b><br>אפליקציה חינמית שמקבלת את ההתראות. התקן והירשם לנושא:</div>' +
+      'ntfy</b><br>אפליקציה חיצונית וחינמית שמעבירה את ההתראות. אחרי ' +
+      'ההתקנה, לחץ בתוכה על + והדבק את הנושא הזה:</div>' +
     '<pre class="sync-box wrap" id="myTopic">' + esc(me.topic) + '</pre>' +
     '<div class="frow" style="margin-top:9px">' +
       '<button class="btn ghost" onclick="copyBox(\'myTopic\')">העתק נושא</button>' +
-      '<a class="btn ghost" href="https://ntfy.sh/app" target="_blank" ' +
-        'rel="noopener" style="text-align:center">פתח את ntfy</a>' +
+      '<a class="btn ghost" href="' + ntfyInstallUrl() + '" target="_blank" ' +
+        'rel="noopener" style="text-align:center">התקן ntfy</a>' +
     '</div>' +
     '<div class="score-note" style="margin:14px 0 9px"><b>שלב 2 — שלח את ' +
       'הקוד הזה פעם אחת</b><br>לבעל האפליקציה, בוואטסאפ. רק אחרי שהוא ' +
@@ -4060,22 +4078,38 @@ function guideStep(n) {
       title: 'מחירים חיים',
       badge: guideBadge(hasPrices, 'מחובר', 'לא חובה'),
       body:
-        '<div class="score-note" style="margin-bottom:11px">בלי זה המחירים ' +
+        '<div class="score-note" style="margin-bottom:13px">בלי זה המחירים ' +
           'מגיעים מהסריקה בשרת ומתעדכנים כל רבע שעה. מפתח חינמי מ־Finnhub ' +
-          'הופך אותם לחיים. לוקח שתי דקות.</div>' +
-        '<div class="score-note" style="margin-bottom:9px"><b>1.</b> היכנס ' +
-          'ל־finnhub.io והירשם עם מייל. <b>2.</b> העתק את המפתח מהדף ' +
-          'הראשי. <b>3.</b> הדבק כאן:</div>' +
-        '<input id="apiUrl" placeholder="מפתח Finnhub" autocomplete="off" ' +
-          'autocapitalize="off" spellcheck="false" value="' +
+          '(אתר חיצוני, לא קשור לאפליקציה הזו) הופך אותם לחיים. לוקח שתי ' +
+          'דקות, ולא צריך כרטיס אשראי.</div>' +
+
+        '<div class="gstep"><b>1.</b> לחץ על <b>הרשמה ל-Finnhub</b> למטה — ' +
+          'זה פותח את האתר שלהם בלשונית חדשה.</div>' +
+        '<div class="gstep"><b>2.</b> מלא את המייל שלך ובחר סיסמה, ולחץ על ' +
+          'כפתור ההרשמה בטופס. <b>אין צורך לאמת את המייל</b> — אתה עובר ' +
+          'ישר לדשבורד שלך.</div>' +
+        '<div class="gstep"><b>3.</b> בדשבורד, למעלה, מופיע <b>API Key</b> — ' +
+          'מחרוזת ארוכה של אותיות ומספרים. העתק אותה (יש לצידה כפתור ' +
+          'העתקה, או סמן אותה ידנית).</div>' +
+        '<div class="gstep"><b>4.</b> חזור ללשונית הזו והדבק את המפתח בשדה ' +
+          'למטה, ואז לחץ <b>שמור ובדוק</b>.</div>' +
+
+        '<div class="frow" style="margin-top:4px">' +
+          '<a class="btn ghost" href="https://finnhub.io/register" ' +
+            'target="_blank" rel="noopener" style="text-align:center">' +
+            'הרשמה ל-Finnhub</a>' +
+        '</div>' +
+        '<input id="apiUrl" placeholder="הדבק כאן את המפתח" ' +
+          'autocomplete="off" autocapitalize="off" spellcheck="false" ' +
+          'style="margin-top:9px" value="' +
           esc(store.get(LS.api, '') || '') + '">' +
         '<div class="frow" style="margin-top:9px">' +
           '<button class="btn" onclick="saveQuoteApi()">שמור ובדוק</button>' +
-          '<a class="btn ghost" href="https://finnhub.io/register" ' +
-            'target="_blank" rel="noopener" style="text-align:center">' +
-            'הרשמה</a>' +
         '</div>' +
-        '<div class="score-note" id="apiNote" style="margin-top:9px"></div>'
+        '<div class="score-note" id="apiNote" style="margin-top:9px"></div>' +
+        '<div class="score-note" style="margin-top:11px">נתקעת? ודא ' +
+          'שהעתקת את כל המפתח, בלי רווח לפני או אחרי. אפשר גם לדלג על השלב ' +
+          'הזה ולחזור אליו מאוחר יותר — גלגל השיניים ← מקור מחירים.</div>'
     };
   }
 
@@ -4109,23 +4143,38 @@ function guideStep(n) {
       title: 'התראות לטלפון',
       badge: guideBadge(true, 'מופעל', ''),
       body:
-        '<div class="score-note" style="margin-bottom:9px"><b>שלב א׳</b> — ' +
-          'התקן את האפליקציה <b>ntfy</b> בטלפון (חינם), ובתוכה הוסף את ' +
-          'הנושא הזה:</div>' +
+        '<div class="score-note" style="margin-bottom:12px"><b>שלב א׳ — ' +
+          'התקן את ntfy</b><br>אפליקציה חיצונית וחינמית שרק מעבירה הודעות ' +
+          '— לא רואה שום דבר מהרשימות שלך.</div>' +
+
+        '<div class="gstep"><b>1.</b> לחץ על <b>התקן ntfy</b> למטה. הכפתור ' +
+          'מזהה לבד אם זה אייפון או אנדרואיד ופותח את החנות הנכונה.</div>' +
+        '<div class="gstep"><b>2.</b> אחרי ההתקנה, פתח את ntfy ולחץ על ' +
+          'כפתור ה-<b>+</b> (הוספת נושא חדש / Subscribe to topic).</div>' +
+        '<div class="gstep"><b>3.</b> הדבק בדיוק את הנושא הבא, ואשר:</div>' +
         '<pre class="sync-box wrap" id="gTopic">' + esc(me.topic) + '</pre>' +
         '<div class="frow" style="margin-top:9px">' +
-          '<button class="btn ghost" onclick="copyBox(\'gTopic\')">העתק</button>' +
-          '<a class="btn ghost" href="https://ntfy.sh/app" target="_blank" ' +
-            'rel="noopener" style="text-align:center">פתח ntfy</a>' +
+          '<button class="btn ghost" onclick="copyBox(\'gTopic\')">העתק ' +
+            'נושא</button>' +
+          '<a class="btn" href="' + ntfyInstallUrl() + '" target="_blank" ' +
+            'rel="noopener" style="text-align:center">התקן ntfy</a>' +
         '</div>' +
-        '<div class="score-note" style="margin:13px 0 9px"><b>שלב ב׳</b> — ' +
-          'שלח את הקוד הזה פעם אחת למי שנתן לך את האפליקציה. עד שהוא ' +
-          'יוסיף אותך, ההתראות עוד לא ירוצו:</div>' +
+
+        '<div class="score-note" style="margin:16px 0 12px"><b>שלב ב׳ — ' +
+          'שלח את הקוד הזה פעם אחת</b><br>למי שנתן לך את האפליקציה — ' +
+          'בוואטסאפ, לא כאן. עד שהוא יוסיף אותך אצלו, ההתראות עוד ' +
+          'לא ירוצו, גם אם שלב א׳ כבר מוכן.</div>' +
+        '<div class="gstep"><b>1.</b> לחץ <b>העתק קוד</b> למטה.</div>' +
+        '<div class="gstep"><b>2.</b> פתח את השיחה בוואטסאפ, הדבק, ' +
+          'ושלח.</div>' +
         '<pre class="sync-box wrap" id="gCode">' + esc(myCode()) + '</pre>' +
         '<div class="frow" style="margin-top:9px">' +
           '<button class="btn" onclick="copyBox(\'gCode\')">העתק קוד</button>' +
         '</div>' +
-        '<div class="score-note" id="copyNote" style="margin-top:8px"></div>'
+        '<div class="score-note" id="copyNote" style="margin-top:8px"></div>' +
+        '<div class="score-note" style="margin-top:11px">אחרי שהוא מוסיף ' +
+          'אותך — עד רבע שעה וההתראות מתחילות. אין צורך לעשות שוב כלום, ' +
+          'גם לא בפעם הבאה שמוסיפים התראה.</div>'
     };
   }
 
