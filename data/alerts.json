@@ -79,6 +79,11 @@
       "s": "INTC",
       "d": "above",
       "p": 96
+    },
+    {
+      "s": "ORCL",
+      "d": "above",
+      "p": 160
     }
   ],
   "watch": [
