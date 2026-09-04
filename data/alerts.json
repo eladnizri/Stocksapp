@@ -79,6 +79,11 @@
       "s": "ORCL",
       "d": "above",
       "p": 160
+    },
+    {
+      "s": "HOOD",
+      "d": "above",
+      "p": 125
     }
   ],
   "watch": [
