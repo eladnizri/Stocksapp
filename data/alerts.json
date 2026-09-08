@@ -1,11 +1,6 @@
 {
   "alerts": [
     {
-      "s": "IREN",
-      "d": "above",
-      "p": 46.55
-    },
-    {
       "s": "AXON",
       "d": "above",
       "p": 657
