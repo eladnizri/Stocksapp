@@ -84,33 +84,11 @@
       "s": "OXY",
       "d": "above",
       "p": 67.5
-    },
-    {
-      "s": "BAC",
-      "d": "below",
-      "p": 57.55,
-      "tid": 1789495760512,
-      "kind": "stop"
-    },
-    {
-      "s": "BAC",
-      "d": "above",
-      "p": 69,
-      "tid": 1789495760512,
-      "kind": "target"
     }
   ],
   "watch": [
     "TSLA",
     "META"
   ],
-  "positions": [
-    {
-      "s": "BAC",
-      "entry": 59.58,
-      "qty": 40,
-      "stop": 57.55,
-      "target": 69
-    }
-  ]
+  "positions": []
 }
