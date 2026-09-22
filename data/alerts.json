@@ -66,6 +66,20 @@
       "p": 50
     },
     {
+      "s": "SNDK",
+      "d": "below",
+      "p": 1800,
+      "tid": 1790096183564,
+      "kind": "stop"
+    },
+    {
+      "s": "SNDK",
+      "d": "above",
+      "p": 2300,
+      "tid": 1790096183564,
+      "kind": "target"
+    },
+    {
       "s": "HOOD",
       "d": "below",
       "p": 118.12,
@@ -85,6 +99,13 @@
     "META"
   ],
   "positions": [
+    {
+      "s": "SNDK",
+      "entry": 1887.99,
+      "qty": 0.4,
+      "stop": 1800,
+      "target": 2300
+    },
     {
       "s": "HOOD",
       "entry": 125.14,
