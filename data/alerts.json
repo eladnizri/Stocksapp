@@ -1,11 +1,6 @@
 {
   "alerts": [
     {
-      "s": "AXON",
-      "d": "above",
-      "p": 657
-    },
-    {
       "s": "WDC",
       "d": "above",
       "p": 570
