@@ -1,11 +1,6 @@
 {
   "alerts": [
     {
-      "s": "WDC",
-      "d": "above",
-      "p": 570
-    },
-    {
       "s": "SOFI",
       "d": "above",
       "p": 20.5
