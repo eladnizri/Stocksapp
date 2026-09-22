@@ -69,11 +69,33 @@
       "s": "HPE",
       "d": "above",
       "p": 64.2
+    },
+    {
+      "s": "HOOD",
+      "d": "below",
+      "p": 120,
+      "tid": 1790084417124,
+      "kind": "stop"
+    },
+    {
+      "s": "HOOD",
+      "d": "above",
+      "p": 154.85,
+      "tid": 1790084417124,
+      "kind": "target"
     }
   ],
   "watch": [
     "TSLA",
     "META"
   ],
-  "positions": []
+  "positions": [
+    {
+      "s": "HOOD",
+      "entry": 125.48,
+      "qty": 16,
+      "stop": 120,
+      "target": 154.85
+    }
+  ]
 }
