@@ -64,33 +64,11 @@
       "s": "IREN",
       "d": "above",
       "p": 50
-    },
-    {
-      "s": "MRVL",
-      "d": "below",
-      "p": 245,
-      "tid": 1790095580363,
-      "kind": "stop"
-    },
-    {
-      "s": "MRVL",
-      "d": "above",
-      "p": 320,
-      "tid": 1790095580363,
-      "kind": "target"
     }
   ],
   "watch": [
     "TSLA",
     "META"
   ],
-  "positions": [
-    {
-      "s": "MRVL",
-      "entry": 263.1,
-      "qty": 4,
-      "stop": 245,
-      "target": 320
-    }
-  ]
+  "positions": []
 }
