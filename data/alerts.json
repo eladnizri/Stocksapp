@@ -66,6 +66,20 @@
       "p": 50
     },
     {
+      "s": "MRVL",
+      "d": "below",
+      "p": 237.38,
+      "tid": 1790096274095,
+      "kind": "stop"
+    },
+    {
+      "s": "MRVL",
+      "d": "above",
+      "p": 320,
+      "tid": 1790096274095,
+      "kind": "target"
+    },
+    {
       "s": "SNDK",
       "d": "below",
       "p": 1800,
@@ -99,6 +113,13 @@
     "META"
   ],
   "positions": [
+    {
+      "s": "MRVL",
+      "entry": 263.25,
+      "qty": 3,
+      "stop": 237.38,
+      "target": 320
+    },
     {
       "s": "SNDK",
       "entry": 1887.99,
