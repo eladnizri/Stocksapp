@@ -64,11 +64,33 @@
       "s": "IREN",
       "d": "above",
       "p": 50
+    },
+    {
+      "s": "HOOD",
+      "d": "below",
+      "p": 110.46,
+      "tid": 1790095962369,
+      "kind": "stop"
+    },
+    {
+      "s": "HOOD",
+      "d": "above",
+      "p": 154.51,
+      "tid": 1790095962369,
+      "kind": "target"
     }
   ],
   "watch": [
     "TSLA",
     "META"
   ],
-  "positions": []
+  "positions": [
+    {
+      "s": "HOOD",
+      "entry": 125.14,
+      "qty": 118.12,
+      "stop": 110.46,
+      "target": 154.51
+    }
+  ]
 }
