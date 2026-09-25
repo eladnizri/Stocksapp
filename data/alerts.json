@@ -66,20 +66,6 @@
       "p": 705
     },
     {
-      "s": "HPE",
-      "d": "below",
-      "p": 60,
-      "tid": 1790344904235,
-      "kind": "stop"
-    },
-    {
-      "s": "HPE",
-      "d": "above",
-      "p": 85,
-      "tid": 1790344904235,
-      "kind": "target"
-    },
-    {
       "s": "MRVL",
       "d": "below",
       "p": 237.38,
@@ -99,13 +85,6 @@
     "META"
   ],
   "positions": [
-    {
-      "s": "HPE",
-      "entry": 65,
-      "qty": 10,
-      "stop": 60,
-      "target": 85
-    },
     {
       "s": "MRVL",
       "entry": 263.25,
