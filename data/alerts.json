@@ -64,11 +64,33 @@
       "s": "EFX",
       "d": "above",
       "p": 143
+    },
+    {
+      "s": "EFX",
+      "d": "below",
+      "p": 137.19,
+      "tid": 1791295970762,
+      "kind": "stop"
+    },
+    {
+      "s": "EFX",
+      "d": "above",
+      "p": 173,
+      "tid": 1791295970762,
+      "kind": "target"
     }
   ],
   "watch": [
     "TSLA",
     "META"
   ],
-  "positions": []
+  "positions": [
+    {
+      "s": "EFX",
+      "entry": 143.35,
+      "qty": 3,
+      "stop": 137.19,
+      "target": 173
+    }
+  ]
 }
